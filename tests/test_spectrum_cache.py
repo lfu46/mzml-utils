@@ -148,5 +148,51 @@ def test_spectrum_cache():
     main()
 
 
+def _build_min_db(tmp, source_mzml, source_size=1, source_mtime=1):
+    db = os.path.join(tmp, "min.spectra.db")
+    conn = sc.open_db(db)
+    sc.insert_scan(conn, _mk(1, 1, "MS1", mz=[400.0], inten=[10]))
+    sc.set_meta(conn, schema_version=sc.SCHEMA_VERSION, source_mzml=source_mzml,
+                source_size=source_size, source_mtime=source_mtime, n_scans=1, n_pairs=0)
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_source_blind_safety():
+    """P1 (safety): the cache never touches a network source by default.
+
+    os.stat / MzMLReader against a wedged SMB share can hang uninterruptibly, so
+    is_stale() and verify_cache() must refuse a /Volumes source unless explicitly allowed.
+    """
+    tmp = tempfile.mkdtemp()
+
+    # network source -> is_stale refuses (None) without stat-ing; verify_cache refuses (raises)
+    net_db = _build_min_db(tmp, "/Volumes/fake_share/x.mzML")
+    c = sc.SpectrumCache(net_db, mirror_local=False)
+    assert c.is_stale() is None, "is_stale must refuse a /Volumes source by default"
+    c.close()
+    try:
+        sc.verify_cache(net_db)
+        raise AssertionError("verify_cache must refuse a network source by default")
+    except RuntimeError:
+        pass
+
+    # local source that matches -> not stale; after mutation -> stale (local path still works)
+    local_src = os.path.join(tmp, "local_src.mzML")
+    with open(local_src, "wb") as fh:
+        fh.write(b"x" * 100)
+    st = os.stat(local_src)
+    loc_db = _build_min_db(tmp, local_src, source_size=st.st_size, source_mtime=int(st.st_mtime))
+    c = sc.SpectrumCache(loc_db, mirror_local=False)
+    assert c.is_stale() is False, "matching local source -> not stale"
+    with open(local_src, "ab") as fh:
+        fh.write(b"more")
+    assert c.is_stale() is True, "changed local source -> stale"
+    c.close()
+
+
 if __name__ == "__main__":
     main()
+    test_source_blind_safety()
+    print("RESULT: source-blind safety PASS")

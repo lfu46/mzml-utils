@@ -2,15 +2,17 @@
 """
 spectrum-cache: build-once, read-fast local cache of everything spectrum annotation needs.
 
-Reads an mzML ONE time (the only slow / network step) and writes a compact, lossless,
-indexed SQLite cache. All later annotation reads go through ``SpectrumCache``, which
+Reads an mzML ONE time (the only slow / network step) and writes a compact, float32
+(near-lossless), indexed SQLite cache. All later annotation reads go through ``SpectrumCache``, which
 returns ``mzml_utils.Spectrum`` objects -- a drop-in for ``mzml_utils.MzMLReader`` -- so
 both the ``nglyco-analysis`` and ``oglyco-analysis`` skills work unchanged via
 ``open_spectra()``.
 
 Design (see PLAN):
-  * LOSSLESS raw peaks (float32 + zlib). N-glyco matches raw (un-deisotoped) spectra and
-    O-glyco deisotopes on the fly -- a filtered/deisotoped cache would break N-glyco.
+  * RAW peaks stored as float32 + zlib (near-lossless: not bit-exact if the source was
+    float64, but <~0.2 ppm m/z error -- negligible for glyco matching). N-glyco matches
+    raw (un-deisotoped) spectra and O-glyco deisotopes on the fly -- a filtered/deisotoped
+    cache would break N-glyco.
   * Captures MORE than the 15-field Spectrum dataclass: ion injection time, FAIMS CV,
     collision energy, scan window, precursor->master-MS1 ref, polarity, centroid flag,
     plus a zlib(JSON) catch-all of every remaining scalar param (nothing lost).
@@ -32,6 +34,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import zlib
@@ -72,8 +75,8 @@ CREATE TABLE IF NOT EXISTS scans (
     base_peak_mz          REAL,
     base_peak_intensity   REAL,
     n_peaks               INTEGER,
-    mz_blob               BLOB,        -- zlib(float32[])  RAW, lossless
-    int_blob              BLOB,        -- zlib(float32[])  RAW, lossless
+    mz_blob               BLOB,        -- zlib(float32[])  RAW peaks (float32; not bit-exact)
+    int_blob              BLOB,        -- zlib(float32[])  RAW peaks (float32; not bit-exact)
     raw_meta_z            BLOB         -- zlib(JSON) catch-all of remaining scalar params
 );
 CREATE INDEX IF NOT EXISTS idx_scans_mslevel ON scans(ms_level);
@@ -417,7 +420,7 @@ def build_cache(mzml_path: str, db_path: str, commit_every: int = 2000,
                  source_size=st.st_size, source_mtime=int(st.st_mtime),
                  n_scans=n, n_pairs=n_pairs, ms_levels=levels, activations=acts,
                  build_seconds=round(time.time() - t0, 1), mzml_utils_version=mu_ver,
-                 lossless=True)
+                 peak_dtype="float32", bit_exact=False)
         conn.commit()
         conn.close()
         conn = None
@@ -577,11 +580,21 @@ class SpectrumCache:
     def meta(self) -> dict:
         return {r["key"]: json.loads(r["value"]) for r in self._conn.execute("SELECT key, value FROM meta")}
 
-    def is_stale(self) -> Optional[bool]:
-        """True if the source mzML changed since build (size/mtime); None if unknown."""
+    def is_stale(self, allow_network: bool = False) -> Optional[bool]:
+        """True if the source mzML changed since build (size/mtime); None if unknown.
+
+        SOURCE-BLIND by default: refuses to touch a network (/Volumes) source because
+        os.stat / os.path.exists on a wedged SMB share can hang the process in
+        uninterruptible I/O. Pass allow_network=True only for a source you know is
+        reachable/local; otherwise this returns None (unknown) without touching it.
+        """
         m = self.meta()
         src = m.get("source_mzml")
-        if not src or not os.path.exists(src):
+        if not src:
+            return None
+        if _is_network(src) and not allow_network:
+            return None  # refuse to stat a network source -- can wedge on SMB
+        if not os.path.exists(src):
             return None
         s = os.stat(src)
         return not (s.st_size == m.get("source_size") and int(s.st_mtime) == m.get("source_mtime"))
@@ -628,11 +641,23 @@ def open_spectra(path: str, prefer_cache: bool = True, in_memory=None,
 # --------------------------------------------------------------------------- #
 # verify (run against the real mzML when the user chooses)
 # --------------------------------------------------------------------------- #
-def verify_cache(db_path: str, k: int = 25, seed_scans: Optional[List[int]] = None) -> dict:
-    """Compare K scans between the cache and the source mzML via MzMLReader."""
+def verify_cache(db_path: str, k: int = 25, seed_scans: Optional[List[int]] = None,
+                 source: Optional[str] = None, allow_network: bool = False) -> dict:
+    """Compare K scans between the cache and the source mzML via MzMLReader.
+
+    Refuses a network (/Volumes) source by default -- reading a wedged SMB share can
+    hang uninterruptibly. Pass an explicit LOCAL ``source`` override, or
+    allow_network=True for a source you know is reachable. Raises RuntimeError rather
+    than silently touching the share.
+    """
     from .reader import MzMLReader
     cache = SpectrumCache(db_path, mirror_local=False)
-    src = cache.meta().get("source_mzml")
+    src = source or cache.meta().get("source_mzml")
+    if src and _is_network(src) and not allow_network:
+        cache.close()
+        raise RuntimeError(
+            f"refusing to verify against a network source ({src}); pass an explicit local "
+            f"source= / --source or allow_network=True (reading a wedged SMB share can hang)")
     reader = MzMLReader(src)
     scans = seed_scans or [r["scan_num"] for r in cache._conn.execute(
         "SELECT scan_num FROM scans ORDER BY scan_num LIMIT ?", (k,))]
@@ -672,12 +697,17 @@ def _cli():
     b.add_argument("--keep-local-temp", action="store_true",
                    help="keep the local temp files (source copy + build DB) instead of removing them")
 
-    i = sub.add_parser("info", help="show cache provenance + counts")
+    i = sub.add_parser("info", help="show cache provenance + counts (source-blind)")
     i.add_argument("db")
+    i.add_argument("--check-source", action="store_true",
+                   help="also stat the source mzML for staleness (do NOT use for a /Volumes source -- can hang)")
 
     v = sub.add_parser("verify", help="compare K scans against the source mzML")
     v.add_argument("db")
     v.add_argument("-k", type=int, default=25)
+    v.add_argument("--source", help="verify against this LOCAL mzML instead of the recorded (maybe network) source")
+    v.add_argument("--allow-network", action="store_true",
+                   help="allow verifying against a /Volumes source (can hang on SMB)")
 
     args = ap.parse_args()
     if args.cmd == "build":
@@ -704,10 +734,16 @@ def _cli():
     elif args.cmd == "info":
         c = SpectrumCache(args.db, mirror_local=False)
         print(json.dumps(c.meta(), indent=2))
-        print("stale:", c.is_stale())
+        if args.check_source:
+            print("stale:", c.is_stale(allow_network=True))
+        else:
+            print("stale: (not checked -- source-blind; pass --check-source, but never for a /Volumes source)")
         c.close()
     elif args.cmd == "verify":
-        print(json.dumps(verify_cache(args.db, k=args.k), indent=2, default=str))
+        res = verify_cache(args.db, k=args.k, source=args.source, allow_network=args.allow_network)
+        print(json.dumps(res, indent=2, default=str))
+        if not res.get("ok"):
+            sys.exit(1)   # nonzero exit when the cache does not match the source
 
 
 if __name__ == "__main__":
