@@ -29,6 +29,9 @@ classifiers = [
 dependencies = [
     "pyteomics>=4.7",
     "numpy>=1.20",
+    # mzml_utils.structure -- protein structure database clients. Imported
+    # lazily, so a spectrum-only script never pays for it.
+    "requests>=2.28",
 ]
 
 [project.optional-dependencies]
@@ -47,3 +50,6 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "network: hits live public APIs (EBI/UniProt); deselect with -m 'not network'",
+]

@@ -7,11 +7,18 @@ Modules:
     pairing    - MS1 cycle organisation, HCD-EThcD pairing
     fragments  - Fragment ion calculator, peak matching, false match rate
     deisotope  - Averagine-scored deisotoping and MS1 envelope scoring
+    xic        - Extracted ion chromatogram (XIC) extraction over a run
     similarity - Spectral similarity metrics (cosine, entropy, KL, etc.)
     averaging  - Spectral averaging with outlier rejection and weighting
     proteases  - Protease definitions and in silico protein digestion
     constants  - Physical constants, amino acid masses, common ion lists
     utils      - Spectrum ID parsing, file finding, modification parsing
+    structure  - Protein structure databases (AlphaFold, PDBe, UniProt,
+                 InterPro) behind one resolver
+
+``structure`` is imported lazily: it pulls in ``requests``, and the spectrum
+side of this package has no use for HTTP. ``mzml_utils.structure`` and
+``from mzml_utils.structure import ...`` both work as normal.
 """
 
 __version__ = "0.1.0"
@@ -64,6 +71,9 @@ from .fragments import (
 
 # deisotope
 from .deisotope import deisotope, score_ms1_envelope, IsotopeCluster
+
+# xic -- extracted ion chromatograms (intensity vs retention time)
+from .xic import extract_xic, extract_xics, XIC, ChromatogramSet
 
 # canonical match layer
 from .match_context import (
@@ -150,6 +160,11 @@ __all__ = [
     "deisotope",
     "score_ms1_envelope",
     "IsotopeCluster",
+    # xic (extracted ion chromatograms)
+    "extract_xic",
+    "extract_xics",
+    "XIC",
+    "ChromatogramSet",
     # constants
     "PROTON",
     "H2O",
@@ -177,4 +192,25 @@ __all__ = [
     "parse_spectrum_id",
     "find_mzml_file",
     "parse_modifications",
+    # structure (lazy submodule)
+    "structure",
 ]
+
+
+def __getattr__(name: str):
+    """Lazy submodule access (PEP 562).
+
+    Keeps ``import mzml_utils`` free of the ``requests`` import for the many
+    spectrum scripts that never touch a structure database.
+    """
+    if name == "structure":
+        import importlib
+
+        module = importlib.import_module(".structure", __name__)
+        globals()["structure"] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    return sorted(list(globals()) + ["structure"])
