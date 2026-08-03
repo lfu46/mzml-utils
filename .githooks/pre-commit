@@ -1,0 +1,23 @@
+#!/bin/sh
+# mzml-utils pre-commit gate.
+#
+# Deliberately narrow: it enforces the no-branches rule and NOTHING else.
+#
+# It does NOT run the test suite, unlike NGlycoMM's equivalent. As of 2026-08-03 this repo has a
+# pre-existing failing test (tests/test_fragments.py::TestGlycoIons::test_oxonium_ions asserts 7
+# oxonium ions while the working copy's constants.py defines 17), so a test gate here would block
+# every commit until an unrelated question is settled. A guard that locks you out of your own
+# repo gets bypassed with --no-verify and then never comes back, so it is not added until the
+# suite is green.
+#
+# Bypass in a genuine emergency: git commit --no-verify
+
+REPO="$(git rev-parse --show-toplevel)" || exit 1
+cd "$REPO" || exit 1
+
+if ! sh scripts/branch_health.sh; then
+  echo "  (Emergency bypass: git commit --no-verify)"
+  exit 1
+fi
+
+exit 0
