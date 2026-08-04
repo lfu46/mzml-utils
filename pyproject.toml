@@ -27,7 +27,11 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Chemistry",
 ]
 dependencies = [
-    "pyteomics>=4.7",
+    # The [xml] extra is required, not optional: reader.py does `from pyteomics import mzml`,
+    # which pulls in pyteomics.xml -> lxml. pyteomics declares lxml only under its optional
+    # extras, so a plain "pyteomics>=4.7" installs a package that cannot import mzml_utils at
+    # all. It went unnoticed because lxml is usually already present from something else.
+    "pyteomics[xml]>=4.7",
     "numpy>=1.20",
     # mzml_utils.structure -- protein structure database clients. Imported
     # lazily, so a spectrum-only script never pays for it.
