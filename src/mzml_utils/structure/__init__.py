@@ -39,6 +39,18 @@ from __future__ import annotations
 from . import alphafold, beacons, cache, http, interpro, pdbe, uniprot
 from .cache import ENV_CACHE_ROOT, cache_root, read_meta
 from .client import cached_path, fetch_many, fetch_structure, resolve
+from .glycoprotein import (
+    AmbiguousGlycanError,
+    GlycanCandidate,
+    GlycanChoice,
+    GlycoShapeError,
+    NoSuchGlycanError,
+    build_glycoprotein,
+    candidates_for,
+    fetch_library,
+    iupac_to_composition,
+    resolve_glycan,
+)
 from .interpro import domains as interpro_domains
 from .interpro import domains_at as interpro_domains_at
 from .records import (
@@ -67,6 +79,20 @@ __all__ = [
     "accession_state",
     "interpro_domains",
     "interpro_domains_at",
+    # glycoprotein models -- composition is resolved to a structure, or refused
+    "resolve_glycan",
+    "candidates_for",
+    "iupac_to_composition",
+    "fetch_library",
+    "build_glycoprotein",
+    "GlycanCandidate",
+    "GlycanChoice",
+    "AmbiguousGlycanError",
+    "NoSuchGlycanError",
+    "GlycoShapeError",
+    # rendering -- lazily imported, needs PyMOL + matplotlib
+    "render_glycoprotein",
+    "render",
     # result types
     "StructureRecord",
     "ResolveResult",
@@ -88,4 +114,23 @@ __all__ = [
     "interpro",
     "cache",
     "http",
+    "glycoprotein",
 ]
+
+
+def __getattr__(name):
+    """Rendering is imported on demand.
+
+    It needs matplotlib, Pillow and the PyMOL binary; a script that only
+    resolves structures must not pay for them, and must not fail to import when
+    they are absent.  Same lazy boundary the parent package uses for
+    ``requests``.
+    """
+    if name in ("render", "render_glycoprotein"):
+        # importlib, not `from . import render`: the latter consults this very
+        # __getattr__ through _handle_fromlist and recurses forever.
+        import importlib
+
+        mod = importlib.import_module(".render", __name__)
+        return mod if name == "render" else mod.render_glycoprotein
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

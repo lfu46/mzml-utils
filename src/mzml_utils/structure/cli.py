@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import List
+from typing import Dict, List
 
 from .client import fetch_many, resolve
 from .interpro import domains as interpro_domains
@@ -139,6 +139,26 @@ def _cmd_state(args) -> int:
     return 0
 
 
+def _cmd_glycans(args) -> int:
+    """Which 3D structures carry a composition -- and how many, which is the point."""
+    from .glycoprotein import _comp_repr, candidates_for
+
+    comp: Dict[str, int] = {}
+    for part in args.composition.replace(",", " ").split():
+        key, _, val = part.partition("=")
+        comp[key] = int(val or 1)
+    cands = candidates_for(comp, residue=args.residue)
+    print(f"{_comp_repr(comp)} on {args.residue}: {len(cands)} structure(s)")
+    for c in cands:
+        print(f"  {c.glytoucan}\t{c.glycoshape_id}\t{c.iupac}")
+    if len(cands) > 1:
+        print(
+            f"\nAmbiguous: composition alone cannot choose among {len(cands)}. "
+            "Name one with its GlyTouCan id when rendering."
+        )
+    return 0 if len(cands) == 1 else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="python3 -m mzml_utils.structure",
@@ -182,6 +202,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     st = sub.add_parser("state", parents=[common], help="is this accession still live?")
     st.set_defaults(func=_cmd_state)
+
+    g = sub.add_parser(
+        "glycans",
+        help="3D structures matching a composition (exit 1 if ambiguous)",
+    )
+    g.add_argument("composition",
+                   help="e.g. 'HexNAc=4 Hex=5 Fuc=1 NeuAc=2'")
+    g.add_argument("--residue", default="ASN",
+                   help="attachment residue: ASN, SER, THR, TRP, HYP, PRO")
+    g.set_defaults(func=_cmd_glycans)
     return p
 
 

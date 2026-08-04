@@ -39,6 +39,14 @@ dev = [
     "pytest>=7.0",
     "pytest-cov",
 ]
+# mzml_utils.structure.render -- glycoprotein figure panels. Imported lazily
+# behind a module __getattr__, so a retrieval-only script never pays for these.
+# PyMOL is deliberately NOT here: it is not pip-installable, so it is shelled
+# out to and feature-detected with shutil.which().
+render = [
+    "matplotlib>=3.5",
+    "pillow>=9.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/longpingfu/mzml-utils"

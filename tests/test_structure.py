@@ -12,6 +12,7 @@ Two layers:
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -581,3 +582,151 @@ def test_batch_returns_one_row_per_accession(tmp_path):
     assert len(rows) == len(accs)
     assert all("is_answered" in r for r in rows)
     assert json.dumps(rows)  # rows must be JSON-serialisable for status tables
+
+
+# ---------------------------------------------------------------------------
+# Glycoprotein models: composition -> structure, and the refusal to guess
+# ---------------------------------------------------------------------------
+
+def test_iupac_parses_every_sugar_or_raises():
+    """A skipped sugar would collapse two glycans onto one composition."""
+    from mzml_utils.structure.glycoprotein import iupac_to_composition as parse
+
+    assert parse("Man(a1-3)[Man(a1-6)]Man(b1-4)GlcNAc(b1-4)GlcNAc") == \
+        {"Hex": 3, "HexNAc": 2}
+    # modifiers are counted, not dropped
+    assert parse("GlcNAc6P") == {"HexNAc": 1, "Phospho": 1}
+    assert parse("GalNAc4S") == {"HexNAc": 1, "Sulfate": 1}
+    # D-/L- prefixes are stereochemistry, not a different sugar
+    assert parse("D-Fuc(a1-2)Gal") == {"Fuc": 1, "Hex": 1}
+    with pytest.raises(ValueError):
+        parse("Wibble(a1-2)Gal")
+
+
+def test_bracket_stripping_never_invents_a_sugar():
+    """Deleting brackets would join 'Gal' + 'Neu5Ac' into 'GalN' + 'eu5Ac'."""
+    from mzml_utils.structure.glycoprotein import iupac_to_composition as parse
+
+    comp = parse("Neu5Ac(a2-3)Gal(b1-3)[Neu5Ac(a2-3)Gal(b1-4)]GlcNAc")
+    assert comp == {"NeuAc": 2, "Hex": 2, "HexNAc": 1}
+    assert "HexN" not in comp
+
+
+def test_composition_to_structure_is_one_to_many(glycan_library):
+    """The whole reason resolve_glycan can refuse."""
+    from mzml_utils.structure.glycoprotein import candidates_for, iupac_to_composition
+
+    asn = glycan_library["ASN"]
+    comps = {}
+    for e in asn:
+        comps.setdefault(
+            tuple(sorted(iupac_to_composition(e["iupac"]).items())), []
+        ).append(e)
+    # Printed, not asserted to a magic number: an earlier hand count said 216
+    # distinct compositions and 16 for N1H3, and both were wrong.
+    print(f"\nASN: {len(asn)} structures over {len(comps)} distinct compositions")
+    assert len(comps) < len(asn), "compositions must be degenerate, or nothing to refuse"
+
+    assert len(candidates_for({"HexNAc": 2, "Hex": 9}, library=glycan_library)) == 1
+    assert len(candidates_for({"HexNAc": 4, "Hex": 5, "Fuc": 1, "NeuAc": 2},
+                              library=glycan_library)) == 2
+
+
+def test_ambiguous_composition_raises_and_names_the_candidates(glycan_library):
+    from mzml_utils.structure.glycoprotein import AmbiguousGlycanError, resolve_glycan
+
+    with pytest.raises(AmbiguousGlycanError) as exc:
+        resolve_glycan({"HexNAc": 4, "Hex": 5, "Fuc": 1, "NeuAc": 2},
+                       library=glycan_library)
+    err = exc.value
+    assert len(err.candidates) == 2
+    # the message must say WHAT differs, not merely that a choice is needed
+    assert "a2-3" in str(err) and "a2-6" in str(err)
+    assert "G54258NG" in str(err)
+
+
+def test_unambiguous_composition_resolves(glycan_library):
+    from mzml_utils.structure.glycoprotein import resolve_glycan
+
+    choice = resolve_glycan({"HexNAc": 2, "Hex": 9}, library=glycan_library)
+    assert choice.glytoucan == "G92042VQ"
+    assert choice.tier == 2               # composition-only
+    assert any("tier 2" in n for n in choice.notes)
+
+
+def test_naming_a_structure_is_tier_1(glycan_library):
+    from mzml_utils.structure.glycoprotein import resolve_glycan
+
+    choice = resolve_glycan(glytoucan="G54258NG", library=glycan_library)
+    assert choice.tier == 1
+    assert choice.candidate.has_core_fucose
+
+
+def test_strucgp_topology_narrows_ambiguity(glycan_library):
+    """A decoded StrucGP tree is what lifts a site out of composition-only."""
+    from mzml_utils.structure.glycoprotein import resolve_glycan
+
+    # 2 antennae + core fucose describes both a2-3 and a2-6 candidates, so this
+    # must still refuse -- narrowing is not the same as deciding.
+    from mzml_utils.structure.glycoprotein import AmbiguousGlycanError
+    with pytest.raises(AmbiguousGlycanError):
+        resolve_glycan({"HexNAc": 4, "Hex": 5, "Fuc": 1, "NeuAc": 2},
+                       library=glycan_library, strucgp_code="dummy",
+                       parse_strucgp=lambda _: {"antenna_count": 2, "has_core_fuc": True})
+    # a topology no candidate matches must not silently pick one either
+    with pytest.raises(AmbiguousGlycanError):
+        resolve_glycan({"HexNAc": 4, "Hex": 5, "Fuc": 1, "NeuAc": 2},
+                       library=glycan_library, strucgp_code="dummy",
+                       parse_strucgp=lambda _: {"antenna_count": 9, "has_core_fuc": True})
+
+
+def test_render_import_is_lazy():
+    """A retrieval-only script must not pay for matplotlib or Pillow."""
+    import subprocess
+
+    code = (
+        "import sys, mzml_utils.structure as S; S.resolve_glycan; "
+        "print('matplotlib' in sys.modules or 'PIL' in sys.modules)"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert out.stdout.strip() == "False", out.stdout + out.stderr
+
+
+def test_label_placement_avoids_ink(tmp_path):
+    """Labels go on background; that is the whole job."""
+    np = pytest.importorskip("numpy")
+    Image = pytest.importorskip("PIL.Image")
+    from mzml_utils.structure.render import place_labels
+
+    # left half solid black, right half white
+    a = np.full((400, 400, 3), 255, dtype="uint8")
+    a[:, :200] = 0
+    png = tmp_path / "half.png"
+    Image.fromarray(a).save(png)
+
+    placed = place_labels({1: (100.0, 200.0)}, png)
+    assert placed[1].ink <= 0.02
+    assert placed[1].xy[0] > 200, "label must not land on the inked half"
+
+
+def test_marker_selection_brackets_the_within_operand():
+    """PyMOL rejects `sele within X of Y` without a bracketed left operand."""
+    from mzml_utils.structure.render import _marker_selection
+
+    sel = _marker_selection(37, "A")
+    assert "(not polymer.protein and name C1) within 2.5 of" in sel
+    assert "name ND2" in sel and "name CA" not in sel   # linkage, not the Ca
+
+
+@pytest.fixture(scope="module")
+def glycan_library():
+    """The cached GlycoShape library, or skip.
+
+    Cached on first use by fetch_library(); these tests are about the shape of
+    the mapping, not about the network.
+    """
+    from mzml_utils.structure.glycoprotein import fetch_library, library_path
+
+    if not library_path().exists():
+        pytest.skip("GlycoShape library not cached; run fetch_library() once online")
+    return fetch_library()
