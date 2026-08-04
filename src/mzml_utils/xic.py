@@ -42,7 +42,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 # numpy>=2 renamed trapz -> trapezoid; keep working on both.
-_trapz = getattr(np, "trapezoid", getattr(np, "trapz"))
+# NB: must be a conditional, not getattr(np, "trapezoid", getattr(np, "trapz")) -- the default
+# argument there is evaluated eagerly, so on numpy>=2 (where trapz is gone) it raises
+# AttributeError before the trapezoid result can ever be used. That inverted the intent: it
+# worked on numpy 1 and broke on numpy 2.
+_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
 
 TargetSpec = Union[Mapping[str, float], Sequence[Union[float, Tuple[str, float]]]]
 
