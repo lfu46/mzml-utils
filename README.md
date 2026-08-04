@@ -22,6 +22,7 @@ pip install -e ".[dev]"
 |--------|-------------|
 | `reader` | mzML file I/O with indexed and sequential access |
 | `ions` | Ion searching, mass matching, tolerance calculations |
+| `xic` | Extracted ion chromatograms (intensity vs retention time) over a run |
 | `pairing` | MS1 duty-cycle grouping, HCD-EThcD scan pairing |
 | `fragments` | Fragment ion calculator (b/y/c/z/Y/oxonium), peak matching, false match rate |
 | `constants` | Physical constants, amino acid masses, common ion lists |
@@ -52,6 +53,27 @@ for name, match in results.items():
     if match and match['above_threshold']:
         print(f"  {name}: {match['mz']:.4f} ({match['rel_intensity']:.1f}%)")
 ```
+
+### Extract ion chromatograms (XIC)
+
+```python
+from mzml_utils import extract_xic, extract_xics, OXONIUM_IONS
+
+# One precursor / (glyco)peptide XIC from MS1 (source = a path or an open reader)
+xic = extract_xic("experiment.mzML", 1204.564, ms_level=1,
+                  tolerance=20.0, unit='ppm', rt_range=(62.6, 74.1))
+print(f"NL {xic.max_intensity:.2e} at RT {xic.apex_rt:.2f} min")
+
+# Several oxonium ions + TIC/base-peak in a single pass (ChromatogramSet)
+cs = extract_xics("experiment.mzML",
+                  {k: OXONIUM_IONS[k] for k in ("HexNAc", "NeuAc")},
+                  ms_level=2, activation='HCD', tolerance=20.0, unit='ppm')
+print(cs.rt.shape, cs.tic.shape, cs["HexNAc"].max_intensity)
+```
+
+`ms_level=1` gives precursor XICs; `ms_level=2` gives oxonium/fragment XICs (add
+`activation='HCD'` to skip ETD scans, `precursor_mz=...` for a single precursor).
+RT is the reader's native unit (minutes for Thermo msconvert mzML).
 
 ### Calculate fragment ions
 

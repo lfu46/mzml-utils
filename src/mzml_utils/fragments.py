@@ -247,24 +247,57 @@ class FragmentCalculator:
         return ions
 
     def calculate_charge_reduced_precursor(self) -> List[TheoreticalIon]:
-        """Calculate charge-reduced precursor species from ETD."""
+        """Calculate charge-reduced precursor species from ETD.
+
+        Includes:
+        - Charge-reduced radical [M+nH](n-1)+• at each lower charge state
+        - Neutral losses from charge-reduced: -H2O, -NH3, -H2 (2.016 Da)
+        - Isotope peaks (M+1, M+2) for each charge-reduced species
+        """
         ions: List[TheoreticalIon] = []
+        neutral = self.precursor_mass  # monoisotopic neutral mass
+
+        # Neutral losses common in ETD
+        losses = [
+            (0.0, ''),
+            (18.010565, '-H2O'),
+            (17.026549, '-NH3'),
+            (2.01565, '-H2'),      # H2 loss from radical
+        ]
+
         for z in range(1, self.precursor_charge):
-            mz = (self.precursor_mass + z * PROTON) / z
-            ions.append(TheoreticalIon(
-                'precursor', 0, z, mz, self.peptide,
-                annotation=f"[M+{self.precursor_charge}H]{z}+\u2022 (CR)"))
+            for loss_mass, loss_label in losses:
+                for iso in range(3):  # M, M+1, M+2
+                    mz = (neutral - loss_mass + z * PROTON) / z + iso * ISOTOPE_SPACING / z
+                    iso_label = f"+{iso}" if iso > 0 else ""
+                    if loss_label:
+                        ann = f"[M{loss_label}+{z}H]{z}+\u2022{iso_label}"
+                    else:
+                        ann = f"[M+{self.precursor_charge}H]{z}+\u2022{iso_label}"
+                    ions.append(TheoreticalIon(
+                        'precursor', iso, z, mz, self.peptide, annotation=ann))
+
+        # Also at original charge (unfragmented precursor with losses)
+        z = self.precursor_charge
+        for loss_mass, loss_label in losses[1:]:  # skip no-loss (already in isotopes)
+            for iso in range(3):
+                mz = (neutral - loss_mass + z * PROTON) / z + iso * ISOTOPE_SPACING / z
+                iso_label = f"+{iso}" if iso > 0 else ""
+                ann = f"[M{loss_label}+{z}H]{z}+{iso_label}"
+                ions.append(TheoreticalIon(
+                    'precursor', iso, z, mz, self.peptide, annotation=ann))
+
         return ions
 
-    def calculate_precursor_isotopes(self, n_isotopes: int = 4) -> List[TheoreticalIon]:
-        """Calculate precursor isotope peaks."""
+    def calculate_precursor_isotopes(self, n_isotopes: int = 6) -> List[TheoreticalIon]:
+        """Calculate precursor isotope peaks (M, M+1, ... M+n)."""
         ions: List[TheoreticalIon] = []
         spacing = ISOTOPE_SPACING / self.precursor_charge
         for i in range(n_isotopes):
             mz = self.precursor_mz + i * spacing
             ions.append(TheoreticalIon(
                 'precursor', i, self.precursor_charge, mz, self.peptide,
-                annotation=f"[M+{self.precursor_charge}H]{self.precursor_charge}+ iso{i}"))
+                annotation=f"[M+{self.precursor_charge}H]{self.precursor_charge}+ M{'+'+str(i) if i > 0 else ''}"))
         return ions
 
     def calculate_oxonium_ions(self) -> List[TheoreticalIon]:

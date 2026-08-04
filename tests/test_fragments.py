@@ -11,7 +11,7 @@ from mzml_utils.fragments import (
     calculate_false_match_rate,
     calculate_annotation_statistics,
 )
-from mzml_utils.constants import PROTON, H2O, AA_MASSES
+from mzml_utils.constants import PROTON, H2O, AA_MASSES, OXONIUM_IONS
 
 
 @pytest.fixture
@@ -90,8 +90,19 @@ class TestGlycoIons:
 
     def test_oxonium_ions(self, glyco_calc):
         ox = glyco_calc.calculate_oxonium_ions()
-        assert len(ox) == 7
+        # Was `== 7`, which silently went stale when OXONIUM_IONS was expanded from 7 to 17
+        # (NeuAc, Hex, the LacNAc ladder, the HexNAc-Hex/Fuc/NeuAc combinations). Tie the count
+        # to the constant instead, so adding a diagnostic ion does not break the suite, and
+        # assert the ions that actually matter are present.
+        assert len(ox) == len(OXONIUM_IONS)
         assert all(i.charge == 1 for i in ox)
+
+        by_name = {i.annotation: i.mz for i in ox}
+        for name in ("HexNAc", "HexNAc-H2O", "NeuAc", "Hex"):
+            assert name in by_name, f"{name} missing from OXONIUM_IONS"
+        # The two canonical HexNAc diagnostics, to catch a mass regression rather than a rename.
+        assert by_name["HexNAc"] == pytest.approx(204.0867, abs=1e-3)
+        assert by_name["NeuAc"] == pytest.approx(292.1027, abs=1e-3)
 
 
 class TestCalculateAllIons:

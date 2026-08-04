@@ -30,10 +30,18 @@ class Spectrum:
     tic: float = 0.0
     base_peak_mz: float = 0.0
     base_peak_intensity: float = 0.0
+    isolation_window_target: float = 0.0
+    isolation_window_lower: float = 0.0
+    isolation_window_upper: float = 0.0
 
     @property
     def n_peaks(self) -> int:
         return len(self.mz)
+
+    @property
+    def isolation_width(self) -> float:
+        """Total isolation window width in Da."""
+        return self.isolation_window_lower + self.isolation_window_upper
 
 
 def classify_activation(filter_string: str) -> str:
@@ -88,6 +96,9 @@ def _extract_spectrum(spec: dict) -> Spectrum:
     prec_mz = 0.0
     prec_charge = 0
     prec_intensity = 0.0
+    iso_target = 0.0
+    iso_lower = 0.0
+    iso_upper = 0.0
     if 'precursorList' in spec:
         prec = spec['precursorList']['precursor'][0]
         if 'selectedIonList' in prec:
@@ -95,6 +106,11 @@ def _extract_spectrum(spec: dict) -> Spectrum:
             prec_mz = float(sel_ion.get('selected ion m/z', 0))
             prec_charge = int(sel_ion.get('charge state', 0))
             prec_intensity = float(sel_ion.get('peak intensity', 0))
+        if 'isolationWindow' in prec:
+            iso_win = prec['isolationWindow']
+            iso_target = float(iso_win.get('isolation window target m/z', 0))
+            iso_lower = float(iso_win.get('isolation window lower offset', 0))
+            iso_upper = float(iso_win.get('isolation window upper offset', 0))
 
     if ms_level == 1:
         act_type = 'MS1'
@@ -115,6 +131,9 @@ def _extract_spectrum(spec: dict) -> Spectrum:
         tic=float(spec.get('total ion current', 0)),
         base_peak_mz=float(spec.get('base peak m/z', 0)),
         base_peak_intensity=float(spec.get('base peak intensity', 0)),
+        isolation_window_target=iso_target,
+        isolation_window_lower=iso_lower,
+        isolation_window_upper=iso_upper,
     )
 
 
@@ -179,13 +198,60 @@ class MzMLReader:
             for spec in reader:
                 yield _extract_spectrum(spec)
 
+    def find_best_ms1(self, ms2_scan: int, precursor_mz: float,
+                      n_ms1: int = 3, tol_da: float = 0.02) -> Optional[int]:
+        """
+        Find the MS1 scan with the strongest precursor peak.
+
+        Searches backwards from *ms2_scan* through the preceding *n_ms1*
+        MS1 scans and returns the one whose peak closest to *precursor_mz*
+        has the highest intensity.
+
+        Args:
+            ms2_scan: Scan number of the MS2 spectrum.
+            precursor_mz: Expected precursor m/z.
+            n_ms1: Number of preceding MS1 scans to check (default 3).
+            tol_da: Tolerance in Da for matching the precursor peak.
+
+        Returns:
+            Scan number of the best MS1, or the closest MS1 if the
+            precursor is not detected in any of them.
+        """
+        ms1_scans: List[int] = []
+        scan = ms2_scan - 1
+        while len(ms1_scans) < n_ms1 and scan > 0:
+            spec = self.get_spectrum(scan)
+            if spec is not None and spec.ms_level == 1:
+                ms1_scans.append(scan)
+            scan -= 1
+
+        best_scan = None
+        best_int = 0.0
+        for ms1_scan in ms1_scans:
+            spec = self.get_spectrum(ms1_scan)
+            if spec is None:
+                continue
+            mask = np.abs(spec.mz - precursor_mz) < tol_da
+            if mask.any():
+                max_int = float(spec.intensity[mask].max())
+                if max_int > best_int:
+                    best_int = max_int
+                    best_scan = ms1_scan
+
+        # Fallback to closest MS1 if precursor not found
+        if best_scan is None and ms1_scans:
+            best_scan = ms1_scans[0]
+        return best_scan
+
     def extract_metadata(self, scan_num: int) -> Optional[Dict]:
         """
         Extract metadata for a single scan as a plain dict.
 
         Returns:
             Dict with keys: scan_num, ms_level, rt, filter_string,
-            precursor_mz, precursor_charge, activation_type.
+            precursor_mz, precursor_charge, activation_type,
+            isolation_window_target, isolation_window_lower,
+            isolation_window_upper, isolation_width.
             None if the scan is not found.
         """
         spec = self.get_spectrum(scan_num)
@@ -199,4 +265,8 @@ class MzMLReader:
             'precursor_mz': spec.precursor_mz,
             'precursor_charge': spec.precursor_charge,
             'activation_type': spec.activation_type,
+            'isolation_window_target': spec.isolation_window_target,
+            'isolation_window_lower': spec.isolation_window_lower,
+            'isolation_window_upper': spec.isolation_window_upper,
+            'isolation_width': spec.isolation_width,
         }
