@@ -57,6 +57,19 @@ from .pairing import (
     write_combined_etd_mzml,
 )
 
+# reporters (isobaric quant)
+from .reporters import (
+    extract_reporters,
+    extract_reporters_with_fallback,
+    REPORTER_SETS,
+    TMT_6PLEX,
+    TMT_10PLEX,
+    TMT_11PLEX,
+    TMT_16PLEX,
+    TMT_18PLEX,
+    ITRAQ_4PLEX,
+)
+
 # fragments
 from .fragments import (
     FragmentCalculator,
@@ -147,6 +160,16 @@ __all__ = [
     "pair_hcd_ethcd",
     "bin_and_sum_spectra",
     "write_combined_etd_mzml",
+    # reporters (isobaric quant)
+    "extract_reporters",
+    "extract_reporters_with_fallback",
+    "REPORTER_SETS",
+    "TMT_6PLEX",
+    "TMT_10PLEX",
+    "TMT_11PLEX",
+    "TMT_16PLEX",
+    "TMT_18PLEX",
+    "ITRAQ_4PLEX",
     # fragments
     "FragmentCalculator",
     "TheoreticalIon",
