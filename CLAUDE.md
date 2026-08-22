@@ -5,9 +5,16 @@ Shared utility library for the Wu lab's MS and glycoproteomics projects. Install
 
 ## Git workflow — `main` only, no branches, no exceptions
 
-**Work on `main`.** `git pull` before starting, `git commit` + `git push` when done.
+**Work on `main`.** `git pull` before starting, `git commit` when done, then **land with
+`~/.claude/scripts/land_pr.sh <topic> "<title>"`** instead of `git push origin main`. The script
+pushes the new commits to a *remote-only* topic branch, opens a PR, merges it, deletes the branch
+and fast-forwards local `main` — so every change is recorded as a merged PR (the repo is public)
+while nothing below ever changes. `--rev <sha>` lands only part of local `main`; `--reviewer <user>`
+requests a collaborator's review first; `--closes N` auto-closes an issue.
 
-**Never create a branch or worktree, for a change of any size.** This is enforced, not advised:
+**Never create a *local* branch or worktree, for a change of any size.** (`land_pr.sh` creates
+none — its topic branch exists only on origin, for the seconds between push and merge, and both
+guards below stay silent.) This is enforced, not advised:
 
 - `.githooks/pre-commit` runs `scripts/branch_health.sh` and blocks any commit made while a
   branch other than `main`, or a second worktree, exists. Run `bash scripts/dev-setup.sh` once
