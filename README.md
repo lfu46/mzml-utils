@@ -11,7 +11,7 @@ pip install mzml-utils
 For development:
 
 ```bash
-git clone https://github.com/longpingfu/mzml-utils.git
+git clone https://github.com/lfu46/mzml-utils.git
 cd mzml-utils
 pip install -e ".[dev]"
 ```
