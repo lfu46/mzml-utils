@@ -84,6 +84,86 @@ class XIC:
             return 0.0
         return float(_trapz(self.intensity, self.rt))
 
+    def _half_max_span(self):
+        """(apex_idx, half, lo_idx, hi_idx) of the CONTIGUOUS half-maximum region.
+
+        Contiguous on purpose: an XIC often contains more than one peak (a second
+        elution, or an interfering species at the same m/z), and counting every point
+        above half maximum anywhere in the trace would merge them into one absurdly
+        wide peak. Only the region containing the apex is the peak.
+        """
+        n = len(self.intensity)
+        if n == 0:
+            return None
+        apex = int(np.argmax(self.intensity))
+        half = float(self.intensity[apex]) / 2.0
+        if half <= 0.0:
+            return None
+        lo = apex
+        while lo > 0 and self.intensity[lo - 1] >= half:
+            lo -= 1
+        hi = apex
+        while hi < n - 1 and self.intensity[hi + 1] >= half:
+            hi += 1
+        return apex, half, lo, hi
+
+    @property
+    def fwhm(self) -> float:
+        """Full width at half maximum, in the retention-time unit of `rt` (minutes).
+
+        The crossings are linearly interpolated between the bracketing scans rather
+        than snapped to them, because at 9-15 points across a peak, snapping
+        quantises the width in steps of a whole cycle time.
+
+        Returns 0.0 when there is no determinable peak (empty trace, flat, or a
+        single point). Check `fwhm_is_truncated` before treating the value as a
+        measurement: a peak running off either end of the trace yields a LOWER BOUND.
+        """
+        span = self._half_max_span()
+        if span is None or len(self.rt) < 2:
+            return 0.0
+        _apex, half, lo, hi = span
+
+        def cross(i_in, i_out):
+            """RT where the trace crosses `half` between an inside and outside point."""
+            y_in, y_out = float(self.intensity[i_in]), float(self.intensity[i_out])
+            x_in, x_out = float(self.rt[i_in]), float(self.rt[i_out])
+            if y_in == y_out:
+                return x_out
+            return x_out + (half - y_out) * (x_in - x_out) / (y_in - y_out)
+
+        left = cross(lo, lo - 1) if lo > 0 else float(self.rt[lo])
+        right = cross(hi, hi + 1) if hi < len(self.rt) - 1 else float(self.rt[hi])
+        return max(0.0, right - left)
+
+    @property
+    def fwhm_is_truncated(self) -> bool:
+        """True when the half-maximum region reaches an end of the trace.
+
+        The peak is cut off by the extraction window, so `fwhm` and
+        `points_across_peak` are lower bounds, not measurements.
+        """
+        span = self._half_max_span()
+        if span is None:
+            return False
+        _apex, _half, lo, hi = span
+        return lo == 0 or hi == len(self.intensity) - 1
+
+    @property
+    def points_across_peak(self) -> int:
+        """Scans acquired within the full width at half maximum.
+
+        This is the quantity instrument methods expose as "desired minimum points
+        across the peak"; comparing the measured value against that setting is how
+        you tell whether the chromatography is being sampled adequately, and whether
+        a longer gradient has room to broaden peaks further.
+        """
+        span = self._half_max_span()
+        if span is None:
+            return 0
+        _apex, _half, lo, hi = span
+        return int(hi - lo + 1)
+
 
 @dataclass
 class ChromatogramSet:

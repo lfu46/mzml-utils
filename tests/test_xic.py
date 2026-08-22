@@ -143,3 +143,58 @@ class TestExtractXics:
         cs = extract_xics(FakeReader([]), [204.087], ms_level=1)
         assert cs.n_scans == 0
         assert cs["204.0870"].max_intensity == 0.0
+
+
+class TestPeakShape:
+    """fwhm / points_across_peak: chromatographic width from the same object that
+    already carries apex_rt and area, so no project re-derives it.
+
+    The metric they serve is the instrument's own "desired minimum points across the
+    peak" setting -- measured-versus-spec is what says whether the chromatography is
+    adequately sampled, and whether a longer gradient has room to broaden peaks.
+    """
+
+    @staticmethod
+    def _xic(intensity, rt=None):
+        inten = np.asarray(intensity, dtype=float)
+        rt = np.arange(len(inten), dtype=float) if rt is None else np.asarray(rt, dtype=float)
+        return XIC(target_mz=500.0, rt=rt, intensity=inten)
+
+    def test_fwhm_interpolates_between_scans(self):
+        # half-max = 5; crossings interpolate to rt 2.25 and 5.75.
+        # Snapping to the nearest scan instead would quantise the width in steps of a
+        # whole cycle time -- the same order as the differences being measured.
+        x = self._xic([0, 2, 4, 8, 10, 8, 4, 2, 0])
+        assert x.fwhm == pytest.approx(3.5)
+        assert x.points_across_peak == 3
+        assert not x.fwhm_is_truncated
+        assert x.apex_rt == pytest.approx(4.0)
+
+    def test_second_peak_does_not_widen_the_first(self):
+        # An XIC routinely holds a second elution or a co-eluting interference at the
+        # same m/z; counting every point above half max anywhere would merge them.
+        x = self._xic([0, 10, 0, 0, 0, 0, 9, 0])
+        assert x.points_across_peak == 1
+        assert x.fwhm < 1.5
+
+    def test_truncated_peak_is_flagged_not_silently_reported(self):
+        assert self._xic([2, 4, 8, 10]).fwhm_is_truncated       # apex at the last point
+        assert self._xic([10, 8, 4, 2]).fwhm_is_truncated       # apex at the first
+        assert not self._xic([0, 10, 0]).fwhm_is_truncated
+
+    def test_degenerate_traces_return_zero_not_an_exception(self):
+        for trace in ([], [0.0, 0.0, 0.0], [5.0]):
+            x = self._xic(trace)
+            assert x.fwhm == 0.0
+            assert x.points_across_peak in (0, 1)
+
+    def test_fwhm_uses_real_retention_times(self):
+        narrow = self._xic([0, 10, 0], rt=[10.0, 10.2, 10.4])
+        wide = self._xic([0, 10, 0], rt=[10.0, 12.0, 14.0])
+        assert 0.0 < narrow.fwhm < 0.4
+        assert wide.fwhm > narrow.fwhm
+
+    def test_flat_top_peak_spans_the_plateau(self):
+        x = self._xic([0, 6, 10, 10, 10, 6, 0])
+        assert x.points_across_peak == 5       # three 10s plus both 6s (>= half max)
+        assert x.fwhm > 3.0
