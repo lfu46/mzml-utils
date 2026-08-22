@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use mzml-utils in your work, please cite it as below."
+title: "mzml-utils"
+type: software
+version: 0.1.0
+authors:
+  - family-names: Fu
+    given-names: Longping
+    orcid: "https://orcid.org/0009-0006-4275-3264"
+    affiliation: "Georgia Institute of Technology"
+repository-code: "https://github.com/lfu46/mzml-utils"
+license: MIT
+keywords:
+  - mass spectrometry
+  - mzML
+  - proteomics
+  - glycoproteomics
+  - fragment ions
+abstract: "Utilities for mzML mass spectrometry file processing, fragment ion calculation, and peak matching."
