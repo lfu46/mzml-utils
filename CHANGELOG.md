@@ -16,10 +16,12 @@ All notable changes to this project are documented here. The format follows
   co-located `spectra_cache/<stem>.spectra.db` exists, else an indexed `MzMLReader`.
 - Spectrum cache is fail-closed: `info`/`is_stale` are source-blind, `verify` refuses a
   network-share source without an explicit local override and exits non-zero on mismatch.
-- Continuous integration (GitHub Actions, offline pytest on Python 3.9 and 3.13).
+- Continuous integration (GitHub Actions, offline pytest on Python 3.10 and 3.13).
 - `CITATION.cff`.
 
 ### Changed
+- Minimum supported Python is now 3.10. Python 3.9 is end-of-life, and pyteomics ≥ 5.0 (the
+  mzML backend) no longer imports on it — caught by the first CI run.
 - The structure renderer refuses to guess a topology from a glycan composition.
 - Main-only git workflow: pre-commit branch guard and `scripts/dev-setup.sh`.
 
