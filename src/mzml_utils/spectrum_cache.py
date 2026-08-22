@@ -13,7 +13,7 @@ Design (see PLAN):
     float64, but <~0.2 ppm m/z error -- negligible for glyco matching). N-glyco matches
     raw (un-deisotoped) spectra and O-glyco deisotopes on the fly -- a filtered/deisotoped
     cache would break N-glyco.
-  * Captures MORE than the 15-field Spectrum dataclass: ion injection time, FAIMS CV,
+  * Captures MORE than the Spectrum dataclass: FAIMS CV,
     collision energy, scan window, precursor->master-MS1 ref, polarity, centroid flag,
     plus a zlib(JSON) catch-all of every remaining scalar param (nothing lost).
   * Precomputes HCD<->EThcD (xN SA burst) pairing (O-glyco 3-panel; N-glyco ignores it).
@@ -144,7 +144,11 @@ def _jsonable(obj, _depth=0):
 
 
 def extract_extras(spec: dict) -> dict:
-    """Pull the mzML fields the 15-field Spectrum dataclass does NOT carry."""
+    """Pull the mzML fields the Spectrum dataclass does NOT carry.
+
+    ``ion_injection_time`` is kept here too: it is stored in its own column and is
+    also surfaced on Spectrum, so the cache and MzMLReader agree.
+    """
     e: Dict[str, object] = {}
     scan = (spec.get("scanList", {}).get("scan") or [{}])[0]
     e["ion_injection_time"] = scan.get("ion injection time")
@@ -177,13 +181,20 @@ def _row_from(spectrum: Spectrum, extras: Optional[dict] = None) -> tuple:
         except (TypeError, ValueError):
             return None
 
+    # Spectrum now carries ion_injection_time too. Prefer the freshly parsed `extras`
+    # value, but fall back to the dataclass so a Spectrum inserted without extras does
+    # not silently lose it.
+    inj = extras.get("ion_injection_time")
+    if inj is None:
+        inj = spectrum.ion_injection_time or None
+
     return (
         int(spectrum.scan_num), int(spectrum.ms_level), spectrum.activation_type,
         num(spectrum.rt), spectrum.filter_string,
         num(spectrum.precursor_mz), int(spectrum.precursor_charge or 0),
         num(spectrum.precursor_intensity), extras.get("precursor_spectrum_ref"),
         num(spectrum.isolation_window_target), num(spectrum.isolation_window_lower),
-        num(spectrum.isolation_window_upper), num(extras.get("ion_injection_time")),
+        num(spectrum.isolation_window_upper), num(inj),
         num(extras.get("collision_energy")), num(extras.get("compensation_voltage")),
         num(extras.get("scan_window_lo")), num(extras.get("scan_window_hi")),
         extras.get("polarity"), int(extras.get("centroid") or 0),
@@ -204,6 +215,7 @@ def _spectrum_from_row(row: sqlite3.Row) -> Spectrum:
         isolation_window_target=row["iso_target"] or 0.0,
         isolation_window_lower=row["iso_lower"] or 0.0,
         isolation_window_upper=row["iso_upper"] or 0.0,
+        ion_injection_time=row["ion_injection_time"] or 0.0,
     )
 
 
@@ -548,7 +560,8 @@ class SpectrumCache:
                     isolation_window_target=sp.isolation_window_target,
                     isolation_window_lower=sp.isolation_window_lower,
                     isolation_window_upper=sp.isolation_window_upper,
-                    isolation_width=sp.isolation_width)
+                    isolation_width=sp.isolation_width,
+                    ion_injection_time=sp.ion_injection_time)
 
     # -- extras + pairing -------------------------------------------------- #
     def raw_meta(self, scan_num: int) -> Optional[dict]:

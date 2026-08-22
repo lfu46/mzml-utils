@@ -159,6 +159,49 @@ def _build_min_db(tmp, source_mzml, source_size=1, source_mtime=1):
     return db
 
 
+def test_ion_injection_time_round_trip(tmp_path):
+    """ion_injection_time survives Spectrum -> cache -> Spectrum, and is exposed
+    by extract_metadata.
+
+    Regression guard: the field was absent from the Spectrum dataclass entirely, so
+    the only way to reach it was cache-private SQL -- which breaks the contract that
+    SpectrumCache and MzMLReader present an identical API. It is also capped
+    per scan type on real instruments, so it must be readable alongside
+    activation_type rather than separately.
+    """
+    db = os.path.join(str(tmp_path), "inj.spectra.db")
+    conn = sc.open_db(db)
+
+    # (a) supplied via extras, as build_cache does when parsing an mzML
+    s1 = _mk(1, 1, "MS1", mz=[400.0], inten=[10])
+    sc.insert_scan(conn, s1, {"ion_injection_time": 12.5})
+
+    # (b) carried on the Spectrum with no extras -- must NOT be lost
+    s2 = _mk(2, 2, "HCD", iso=500.0, mz=[204.0867], inten=[99])
+    s2.ion_injection_time = 87.25
+    sc.insert_scan(conn, s2)
+
+    # (c) genuinely absent -> 0.0, never an exception
+    sc.insert_scan(conn, _mk(3, 2, "EThcD", iso=600.0, mz=[366.14], inten=[5]))
+
+    sc.set_meta(conn, schema_version=sc.SCHEMA_VERSION, source_mzml="x.mzML",
+                source_size=1, source_mtime=1, n_scans=3, n_pairs=0)
+    conn.commit()
+    conn.close()
+
+    cache = sc.SpectrumCache(db)
+    try:
+        assert cache.get_spectrum(1).ion_injection_time == 12.5
+        assert cache.get_spectrum(2).ion_injection_time == 87.25
+        assert cache.get_spectrum(3).ion_injection_time == 0.0
+        md = cache.extract_metadata(2)
+        assert md["ion_injection_time"] == 87.25
+        # readable alongside the scan type it must be grouped by
+        assert md["activation_type"] == "HCD"
+    finally:
+        cache.close()
+
+
 def test_source_blind_safety():
     """P1 (safety): the cache never touches a network source by default.
 

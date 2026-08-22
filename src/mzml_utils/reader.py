@@ -33,6 +33,13 @@ class Spectrum:
     isolation_window_target: float = 0.0
     isolation_window_lower: float = 0.0
     isolation_window_upper: float = 0.0
+    ion_injection_time: float = 0.0
+    """Trap fill time in ms; 0.0 when the instrument did not report it.
+
+    Instruments cap this **per scan type** -- on an Orbitrap Eclipse, MS1, HCD and
+    EThcD each carry their own maximum -- so a figure pooled across scan types is
+    meaningless. Group by ``activation_type`` before summarising.
+    """
 
     @property
     def n_peaks(self) -> int:
@@ -86,12 +93,16 @@ def _extract_spectrum(spec: dict) -> Spectrum:
 
     rt = 0.0
     filter_string = ''
+    inj_time = 0.0
     if 'scanList' in spec and 'scan' in spec['scanList']:
         scan_info = spec['scanList']['scan'][0]
         rt_val = scan_info.get('scan start time')
         if rt_val is not None:
             rt = float(rt_val)
         filter_string = scan_info.get('filter string', '')
+        inj_val = scan_info.get('ion injection time')
+        if inj_val is not None:
+            inj_time = float(inj_val)
 
     prec_mz = 0.0
     prec_charge = 0
@@ -134,6 +145,7 @@ def _extract_spectrum(spec: dict) -> Spectrum:
         isolation_window_target=iso_target,
         isolation_window_lower=iso_lower,
         isolation_window_upper=iso_upper,
+        ion_injection_time=inj_time,
     )
 
 
@@ -251,7 +263,7 @@ class MzMLReader:
             Dict with keys: scan_num, ms_level, rt, filter_string,
             precursor_mz, precursor_charge, activation_type,
             isolation_window_target, isolation_window_lower,
-            isolation_window_upper, isolation_width.
+            isolation_window_upper, isolation_width, ion_injection_time.
             None if the scan is not found.
         """
         spec = self.get_spectrum(scan_num)
@@ -269,4 +281,5 @@ class MzMLReader:
             'isolation_window_lower': spec.isolation_window_lower,
             'isolation_window_upper': spec.isolation_window_upper,
             'isolation_width': spec.isolation_width,
+            'ion_injection_time': spec.ion_injection_time,
         }
