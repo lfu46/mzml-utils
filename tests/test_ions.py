@@ -122,3 +122,44 @@ class TestIonRank:
         mz = np.array([100.0, 200.0])
         ints = np.array([1000.0, 2000.0])
         assert ion_rank(mz, ints, 500.0, tolerance=0.1, unit='Da') is None
+
+
+class TestNeuGcOxonium:
+    """NeuGc oxonium ions, added 2026-09-10.
+
+    These exist so a NeuGc-containing glycan can be *detected* when the search
+    database has no NeuGc in it, which is the usual case for human samples.
+    Without them the two Urminsky Table 1 ambiguities below are unresolvable.
+    """
+
+    def test_present_in_table(self):
+        from mzml_utils.constants import OXONIUM_IONS
+        assert OXONIUM_IONS['NeuGc'] == pytest.approx(308.0976, abs=1e-4)
+        assert OXONIUM_IONS['NeuGc-H2O'] == pytest.approx(290.0870, abs=1e-4)
+
+    def test_neugc_is_neugc_residue_plus_proton(self):
+        from mzml_utils.constants import OXONIUM_IONS, PROTON, H2O
+        neugc_residue = 307.090331
+        assert OXONIUM_IONS['NeuGc'] == pytest.approx(neugc_residue + PROTON, abs=2e-4)
+        assert OXONIUM_IONS['NeuGc-H2O'] == pytest.approx(
+            neugc_residue - H2O + PROTON, abs=2e-4
+        )
+
+    def test_resolves_the_two_ambiguities_it_exists_for(self):
+        # F1G1 vs H1S1 are EXACTLY isobaric -- no mass measurement separates
+        # them at any resolution, so the oxonium is the only discriminant.
+        hex_, hexnac, fuc = 162.052824, 203.079373, 146.057909
+        neuac, neugc = 291.095417, 307.090331
+        assert (fuc + neugc) == pytest.approx(hex_ + neuac, abs=1e-4)
+        # G1 vs H1F1 differ by 1.0204 Da, one Fuc/NeuAc swap away from a
+        # neutron -- i.e. reachable through a monoisotope error.
+        assert (hex_ + fuc) - neugc == pytest.approx(1.0204, abs=1e-3)
+
+    def test_separated_from_neuac_ions_at_20ppm(self):
+        # 292.1027 vs 290.0870 and 308.0976 vs 274.0921/292.1027: the point is
+        # that a search window around one never catches the other.
+        from mzml_utils.constants import OXONIUM_IONS as O
+        pairs = [('NeuAc', 'NeuGc'), ('NeuAc', 'NeuGc-H2O'),
+                 ('NeuAc-H2O', 'NeuGc'), ('NeuAc-H2O', 'NeuGc-H2O')]
+        for a, b in pairs:
+            assert abs(ppm_error(O[a], O[b])) > 20.0, f"{a} and {b} too close"

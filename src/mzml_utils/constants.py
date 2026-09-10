@@ -91,6 +91,15 @@ OXONIUM_IONS = {
     # NeuAc (sialic acid) diagnostic ions
     'NeuAc': 292.1027,
     'NeuAc-H2O': 274.0921,
+    # NeuGc diagnostic ions. Humans cannot synthesise Neu5Gc (CMAH is a
+    # pseudogene) but cultured cells take it up from serum, so it appears in
+    # data while being absent from most human glycan search databases. When it
+    # is absent from the database the search is forced onto a wrong
+    # composition: G1 lands on H1F1 (delta +1.0204 Da) and F1G1 vs H1S1 is
+    # exactly isobaric. These two ions are the only discriminant.
+    # Urminsky et al., JACS Au 2026, doi:10.1021/jacsau.6c00875, Table 1.
+    'NeuGc': 308.0976,
+    'NeuGc-H2O': 290.0870,
     # Composite glycan oxonium ions
     'HexNAc-Hex-NeuAc': 657.2349,
     'HexNAc_TMT': 529.2937,
@@ -114,6 +123,12 @@ OXONIUM_IONS = {
     'Hex': 163.0601,
 }
 """Glycan oxonium (B-type diagnostic) ion m/z values.
+
+NeuGc ions added 2026-09-10 per Urminsky et al. (JACS Au 2026,
+doi:10.1021/jacsau.6c00875). Their presence is what separates NeuGc-containing
+compositions from the Fuc/Hex combinations they are isobaric or near-isobaric
+with; their absence is the specific observation, so both must be searched even
+when the assigned composition contains no NeuGc.
 
 LacNAc diagnostic ions added 2026-04-14 per Čaval et al. (Anal Chem 2024,
 doi:10.1021/acs.analchem.3c04045). The di-LacNAc ion at m/z 731.27 is the
