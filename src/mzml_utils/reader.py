@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
-from typing import Dict, Generator, List, Optional
+from typing import Dict, Generator, List, Optional, Tuple
 
 from pyteomics import mzml
 
@@ -204,11 +204,22 @@ class MzMLReader:
             return None
         return _extract_spectrum(spec)
 
-    def iter_spectra(self) -> Generator[Spectrum, None, None]:
-        """Iterate over all spectra sequentially."""
+    def iter_spectra(self, ms_level: Optional[int] = None,
+                     rt_range: Optional[Tuple[float, float]] = None
+                     ) -> Generator[Spectrum, None, None]:
+        """Iterate over spectra sequentially, optionally one MS level / RT window.
+
+        Same signature as SpectrumCache.iter_spectra. The MS level is tested on the
+        raw record, before the Spectrum is built; `rt_range` is (min, max) in minutes.
+        """
         with mzml.MzML(self.path) as reader:
             for spec in reader:
-                yield _extract_spectrum(spec)
+                if ms_level is not None and spec.get('ms level', 0) != ms_level:
+                    continue
+                spectrum = _extract_spectrum(spec)
+                if rt_range is not None and not (rt_range[0] <= spectrum.rt <= rt_range[1]):
+                    continue
+                yield spectrum
 
     def find_best_ms1(self, ms2_scan: int, precursor_mz: float,
                       n_ms1: int = 3, tol_da: float = 0.02) -> Optional[int]:

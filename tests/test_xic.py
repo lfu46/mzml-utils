@@ -4,7 +4,9 @@ import numpy as np
 import pytest
 
 from mzml_utils import Spectrum
-from mzml_utils.xic import extract_xic, extract_xics, XIC, ChromatogramSet
+from mzml_utils.constants import NEUTRON_MASS
+from mzml_utils.xic import (extract_xic, extract_xics, XIC, ChromatogramSet,
+                            coelution_score, isotope_trace_evidence)
 
 
 def _ms1(scan, rt, peaks):
@@ -198,3 +200,141 @@ class TestPeakShape:
         x = self._xic([0, 6, 10, 10, 10, 6, 0])
         assert x.points_across_peak == 5       # three 10s plus both 6s (>= half max)
         assert x.fwhm > 3.0
+
+
+class FilteringReader(FakeReader):
+    """Reader whose iter_spectra takes the push-down filters, like the built-in readers."""
+
+    def __init__(self, specs):
+        super().__init__(specs)
+        self.calls = []
+
+    def iter_spectra(self, ms_level=None, rt_range=None):
+        self.calls.append(dict(ms_level=ms_level, rt_range=rt_range))
+        for s in self._specs:
+            if ms_level is not None and s.ms_level != ms_level:
+                continue
+            if rt_range is not None and not (rt_range[0] <= s.rt <= rt_range[1]):
+                continue
+            yield s
+
+
+class TestFilterPushDown:
+    def test_filters_are_passed_to_a_reader_that_accepts_them(self, ms1_reader):
+        reader = FilteringReader(ms1_reader._specs)
+        extract_xic(reader, 1000.50, ms_level=1, rt_range=(10.5, 12.5))
+        assert reader.calls == [dict(ms_level=1, rt_range=(10.5, 12.5))]
+
+    def test_result_is_identical_with_and_without_push_down(self, ms1_reader):
+        plain = extract_xic(ms1_reader, 1000.50, ms_level=1, rt_range=(10.5, 12.5))
+        pushed = extract_xic(FilteringReader(ms1_reader._specs), 1000.50,
+                             ms_level=1, rt_range=(10.5, 12.5))
+        np.testing.assert_allclose(pushed.rt, plain.rt)
+        np.testing.assert_allclose(pushed.intensity, plain.intensity)
+
+    def test_none_filters_are_not_pushed(self, ms1_reader):
+        reader = FilteringReader(ms1_reader._specs)
+        extract_xics(reader, [1000.50], ms_level=None)
+        assert reader.calls == [dict(ms_level=None, rt_range=None)]
+
+
+def _trace(values, name="t"):
+    rt = np.arange(len(values), dtype=float)
+    return XIC(target_mz=500.0, rt=rt, intensity=np.asarray(values, dtype=float), name=name)
+
+
+class TestCoelutionScore:
+    def test_proportional_traces_score_one(self):
+        a = _trace([0, 10, 50, 100, 40, 5, 0])
+        assert coelution_score(a, _trace(a.intensity * 0.3)) == pytest.approx(1.0)
+
+    def test_disjoint_traces_score_zero(self):
+        assert coelution_score(_trace([0, 100, 50, 0, 0, 0]),
+                               _trace([0, 0, 0, 0, 80, 40])) == pytest.approx(0.0)
+
+    def test_partial_overlap_is_a_true_cosine(self):
+        a, b = _trace([0, 3, 4, 0]), _trace([0, 0, 4, 3])
+        assert coelution_score(a, b) == pytest.approx(16.0 / 25.0)
+
+    def test_rt_range_restricts_the_comparison(self):
+        a, b = _trace([100, 0, 10, 20, 10]), _trace([0, 100, 5, 10, 5])
+        assert coelution_score(a, b) < 0.1
+        assert coelution_score(a, b, rt_range=(2.0, 4.0)) == pytest.approx(1.0)
+
+    def test_empty_or_flat_trace_scores_zero(self):
+        assert coelution_score(_trace([0, 0, 0]), _trace([1, 2, 3])) == 0.0
+
+    def test_mismatched_axes_raise(self):
+        with pytest.raises(ValueError):
+            coelution_score(_trace([1, 2, 3]), _trace([1, 2]))
+
+
+def _envelope_reader(mono_mz, charge, ratios, extra=None):
+    """MS1 scans with a Gaussian-ish elution of M, M+1, M+2 at the given intensity
+    ratios. `extra` = (mz, profile) adds one more ion with its own elution profile."""
+    step = NEUTRON_MASS / charge
+    profile = [0, 5, 40, 100, 60, 15, 0]
+    specs = []
+    for i, h in enumerate(profile):
+        peaks = [(mono_mz + k * step, h * r) for k, r in enumerate(ratios) if h * r > 0]
+        if extra is not None and extra[1][i] > 0:
+            peaks.append((extra[0], extra[1][i]))
+        peaks.append((300.0, 10.0))
+        specs.append(_ms1(2 * i + 1, 20.0 + 0.1 * i, sorted(peaks)))
+    return FakeReader(specs)
+
+
+class TestIsotopeTraceEvidence:
+    MONO, Z = 1204.5640, 3
+
+    def test_true_isotopes_coelute(self):
+        ev = isotope_trace_evidence(_envelope_reader(self.MONO, self.Z, [1.0, 0.9, 0.5]),
+                                    self.MONO, self.Z, rt_center=20.3, rt_halfwidth=1.0)
+        assert ev.found
+        assert ev.apex_rt == pytest.approx(20.3)
+        assert ev.coelution[1] == pytest.approx(1.0)
+        assert ev.coelution[2] == pytest.approx(1.0)
+        assert ev.peak_intensity[-1] == 0.0
+        assert not ev.m_minus_1_coelutes
+
+    def test_coeluting_m_minus_1_is_flagged(self):
+        # The "assigned" mono is really M+1 of a species one neutron lighter.
+        step = NEUTRON_MASS / self.Z
+        reader = _envelope_reader(self.MONO - step, self.Z, [0.6, 1.0, 0.8, 0.4])
+        ev = isotope_trace_evidence(reader, self.MONO, self.Z, rt_center=20.3)
+        assert ev.coelution[-1] == pytest.approx(1.0)
+        assert ev.m_minus_1_coelutes
+
+    def test_m_minus_1_that_elutes_elsewhere_is_not_flagged(self):
+        step = NEUTRON_MASS / self.Z
+        other = (self.MONO - step, [80, 40, 0, 0, 0, 0, 0])
+        ev = isotope_trace_evidence(
+            _envelope_reader(self.MONO, self.Z, [1.0, 0.9, 0.5], extra=other),
+            self.MONO, self.Z, rt_center=20.3)
+        assert ev.peak_intensity[-1] == 0.0
+        assert ev.coelution[-1] < 0.1
+        assert not ev.m_minus_1_coelutes
+
+    def test_pattern_cosine_uses_a_supplied_distribution(self):
+        from pyteomics import mass
+        from mzml_utils.isotopes import isotope_distribution
+        comp = mass.Composition(sequence="TPENFPSK") + mass.Composition({"Br": 1, "H": -1})
+        dist = isotope_distribution(comp, n_peaks=3, charge=2)
+        specs = []
+        for i, h in enumerate([0, 10, 100, 30, 0]):
+            peaks = [(mz, h * a) for mz, a in zip(dist.mz, dist.abundance) if h > 0]
+            specs.append(_ms1(i + 1, 12.0 + 0.05 * i, peaks + [(300.0, 1.0)]))
+        ev = isotope_trace_evidence(FakeReader(specs), float(dist.mz[0]), 2, rt_center=12.1,
+                                    distribution=dist)
+        assert ev.pattern_cosine == pytest.approx(1.0)
+        # The averagine cannot express M+2 > M, so it fits the same data worse.
+        avg = isotope_trace_evidence(FakeReader(specs), float(dist.mz[0]), 2, rt_center=12.1,
+                                     tolerance=20.0)
+        assert avg.pattern_cosine < 0.9
+
+    def test_missing_precursor(self):
+        ev = isotope_trace_evidence(_envelope_reader(800.0, 2, [1.0, 0.5]), self.MONO, self.Z,
+                                    rt_center=20.3)
+        assert not ev.found
+        assert ev.pattern_cosine == 0.0
+        assert not ev.m_minus_1_coelutes

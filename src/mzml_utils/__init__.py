@@ -7,7 +7,9 @@ Modules:
     pairing    - MS1 cycle organisation, HCD-EThcD pairing
     fragments  - Fragment ion calculator, peak matching, false match rate
     deisotope  - Averagine-scored deisotoping and MS1 envelope scoring
-    xic        - Extracted ion chromatogram (XIC) extraction over a run
+    isotopes   - Exact-composition isotope distributions (any element, e.g. Br)
+    xic        - Extracted ion chromatogram (XIC) extraction over a run, isotope
+                 co-elution evidence for a precursor
     similarity - Spectral similarity metrics (cosine, entropy, KL, etc.)
     averaging  - Spectral averaging with outlier rejection and weighting
     proteases  - Protease definitions and in silico protein digestion
@@ -85,8 +87,19 @@ from .fragments import (
 # deisotope
 from .deisotope import deisotope, score_ms1_envelope, IsotopeCluster
 
+# isotopes -- exact-composition isotope envelopes (what the averagine cannot express)
+from .isotopes import isotope_distribution, IsotopeDistribution
+
 # xic -- extracted ion chromatograms (intensity vs retention time)
-from .xic import extract_xic, extract_xics, XIC, ChromatogramSet
+from .xic import (
+    extract_xic,
+    extract_xics,
+    XIC,
+    ChromatogramSet,
+    coelution_score,
+    isotope_trace_evidence,
+    IsotopeTraceEvidence,
+)
 
 # canonical match layer
 from .match_context import (
@@ -183,11 +196,17 @@ __all__ = [
     "deisotope",
     "score_ms1_envelope",
     "IsotopeCluster",
+    # isotopes (exact-composition envelopes)
+    "isotope_distribution",
+    "IsotopeDistribution",
     # xic (extracted ion chromatograms)
     "extract_xic",
     "extract_xics",
     "XIC",
     "ChromatogramSet",
+    "coelution_score",
+    "isotope_trace_evidence",
+    "IsotopeTraceEvidence",
     # constants
     "PROTON",
     "H2O",
