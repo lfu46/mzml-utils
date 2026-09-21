@@ -111,6 +111,14 @@ def main():
     check(cache.meta()["n_scans"] == 14, "meta() provenance readable")
     n_ms1 = sum(1 for s in cache.iter_spectra() if s.ms_level == 1)
     check(n_ms1 == 2, f"iter_spectra sees all scans (2 MS1, got {n_ms1})")
+    ms1_only = [s.scan_num for s in cache.iter_spectra(ms_level=1)]
+    check(ms1_only == [1, 8], f"iter_spectra(ms_level=1) -> MS1 scans only, in order (got {ms1_only})")
+    n_ms2 = sum(1 for _ in cache.iter_spectra(ms_level=2))
+    check(n_ms2 == 12, f"iter_spectra(ms_level=2) -> the 12 MS2 scans (got {n_ms2})")
+    windowed = [s.scan_num for s in cache.iter_spectra(rt_range=(2.0, 4.0))]
+    check(windowed == [2, 3, 4], f"iter_spectra(rt_range) is inclusive (got {windowed})")
+    both = [s.scan_num for s in cache.iter_spectra(ms_level=1, rt_range=(2.0, 9.0))]
+    check(both == [8], f"iter_spectra(ms_level, rt_range) combine with AND (got {both})")
     cache.close()
 
     # --- in-memory mode + open_spectra dispatch ---

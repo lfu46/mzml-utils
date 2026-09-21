@@ -517,8 +517,26 @@ class SpectrumCache:
         row = self._conn.execute("SELECT * FROM scans WHERE scan_num=?", (scan_num,)).fetchone()
         return _spectrum_from_row(row) if row else None
 
-    def iter_spectra(self) -> Iterator[Spectrum]:
-        for row in self._conn.execute("SELECT * FROM scans ORDER BY scan_num"):
+    def iter_spectra(self, ms_level: Optional[int] = None,
+                     rt_range: Optional[Tuple[float, float]] = None) -> Iterator[Spectrum]:
+        """Iterate spectra in scan order, optionally only one MS level / RT window.
+
+        The filters run in SQL, so a rejected scan is never zlib-decoded: an MS1-only
+        sweep of a DDA run skips the MS2 scans that make up most of the file.
+        `rt_range` is (min, max) in the stored unit (minutes). Same signature as
+        MzMLReader.iter_spectra.
+        """
+        where, params = [], []
+        if ms_level is not None:
+            where.append("ms_level=?")
+            params.append(int(ms_level))
+        if rt_range is not None:
+            where.append("rt BETWEEN ? AND ?")
+            params.extend((float(rt_range[0]), float(rt_range[1])))
+        sql = "SELECT * FROM scans"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        for row in self._conn.execute(sql + " ORDER BY scan_num", params):
             yield _spectrum_from_row(row)
 
     def find_best_ms1(self, ms2_scan: int, precursor_mz: float,

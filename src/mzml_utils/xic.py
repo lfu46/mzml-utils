@@ -37,9 +37,12 @@ Typical use::
 
 from __future__ import annotations
 
+import inspect
 import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple, Union
+
+from .constants import NEUTRON_MASS, PROTON
 
 # numpy>=2 renamed trapz -> trapezoid; keep working on both.
 # NB: must be a conditional, not getattr(np, "trapezoid", getattr(np, "trapz")) -- the default
@@ -296,7 +299,13 @@ def extract_xics(source, targets: TargetSpec, *,
     lanes: List[List[float]] = [[] for _ in mzs]
 
     def _run(reader):
-        for spec in reader.iter_spectra():
+        # Push the MS-level / RT filters into the reader when it accepts them (both
+        # built-in readers do), so a SpectrumCache never decodes the scans it would
+        # drop. The Python-side checks below stay as the guard for any other reader.
+        accepted = inspect.signature(reader.iter_spectra).parameters
+        pushed = {k: v for k, v in (("ms_level", ms_level), ("rt_range", rt_range))
+                  if v is not None and k in accepted}
+        for spec in reader.iter_spectra(**pushed):
             if ms_level is not None and spec.ms_level != ms_level:
                 continue
             if activation is not None and not _activation_match(spec, activation):
@@ -365,3 +374,132 @@ def extract_xic(source, target_mz: float, *,
                       precursor_tol=precursor_tol, mode=mode, activation=activation,
                       collect_tic=False)
     return cs.xics[nm]
+
+
+# ---------------------------------------------------------------------------
+# Isotope co-elution -- trace-level precursor evidence
+# ---------------------------------------------------------------------------
+
+def coelution_score(a: XIC, b: XIC,
+                    rt_range: Optional[Tuple[float, float]] = None) -> float:
+    """Cosine similarity of two XICs that share one retention-time axis.
+
+    1.0 means the traces rise and fall together (isotopes of one species); near 0
+    means they do not co-elute. The dot product and both norms are taken over the
+    SAME points, so a trace that only partly overlaps the other is scored for what
+    it is rather than penalised twice.
+
+    The traces must come from one :func:`extract_xics` call (same scan grid).
+    Returns 0.0 when either trace is empty or flat zero in the window.
+    """
+    if len(a.intensity) != len(b.intensity):
+        raise ValueError("XICs must share one RT axis (extract them in one extract_xics call)")
+    x, y = a.intensity, b.intensity
+    if rt_range is not None:
+        keep = (a.rt >= rt_range[0]) & (a.rt <= rt_range[1])
+        x, y = x[keep], y[keep]
+    norm = float(np.linalg.norm(x) * np.linalg.norm(y))
+    return float(np.dot(x, y) / norm) if norm > 0 else 0.0
+
+
+@dataclass
+class IsotopeTraceEvidence:
+    """MS1 trace-level evidence for one precursor. Keys are isotope indices
+    relative to the assigned monoisotopic peak: -1, 0, 1, 2, ..."""
+
+    mono_mz: float
+    charge: int
+    apex_rt: float
+    """Apex of the monoisotopic trace inside the window (0.0 when it is empty)."""
+    coelution: Dict[int, float]
+    """Cosine of each isotope trace with the monoisotopic trace (index 0 omitted)."""
+    peak_intensity: Dict[int, float]
+    """Intensity of each isotope summed over the monoisotopic peak's half-maximum span."""
+    pattern_cosine: float
+    """Cosine of the observed M, M+1, ... intensities against the theoretical envelope."""
+    m_minus_1_coelutes: bool
+    """True when a trace one isotope step BELOW the assigned monoisotopic m/z co-elutes
+    with it -- the assigned peak is then probably M+1 of a lighter species."""
+    chromatograms: ChromatogramSet
+
+    @property
+    def found(self) -> bool:
+        return self.peak_intensity.get(0, 0.0) > 0.0
+
+
+def isotope_trace_evidence(source, mono_mz: float, charge: int, *,
+                           rt_center: float, rt_halfwidth: float = 1.0,
+                           n_isotopes: int = 3,
+                           tolerance: float = 10.0, unit: str = "ppm",
+                           distribution=None,
+                           min_coelution: float = 0.7,
+                           min_m_minus_1_ratio: float = 0.1) -> IsotopeTraceEvidence:
+    """Do the isotopes of a precursor co-elute, and is the monoisotopic peak the right one?
+
+    A single MS1 scan cannot tell an isotope from an unrelated ion that happens to
+    sit one neutron away; a chromatographic trace can, because isotopes of one
+    species share an elution profile. One :func:`extract_xics` pass pulls the traces
+    for M-1, M, M+1, ... inside ``rt_center +/- rt_halfwidth`` and scores them.
+
+    Isotope m/z values are anchored on ``mono_mz`` (pass the OBSERVED value when you
+    have it, so calibration error cancels in the spacing). The spacing is
+    ``NEUTRON_MASS / charge``, or the centroid spacing of ``distribution`` when one is
+    given -- needed for a composition whose envelope is not averagine-like (a halogen
+    tag, a heavy label). The M-1 trace is always one ``NEUTRON_MASS / charge`` below.
+
+    Args:
+        source: An open reader or a path (see :func:`extract_xics`).
+        mono_mz: Assigned monoisotopic m/z.
+        charge: Precursor charge.
+        rt_center, rt_halfwidth: Retention window, in the reader's unit (minutes).
+        n_isotopes: Peaks of the envelope to trace (M through M+(n-1)).
+        tolerance, unit: Extraction window per trace.
+        distribution: Optional :class:`~mzml_utils.isotopes.IsotopeDistribution` of the
+            neutral composition. ``None`` uses the averagine of ``deisotope``.
+        min_coelution: Cosine an M-1 trace must reach to count as co-eluting.
+        min_m_minus_1_ratio: Minimum M-1 / M intensity ratio for the same verdict; a
+            real lighter monoisotopic peak is rarely below this under ~8 kDa. Both
+            are screening defaults, not calibrated thresholds -- read the numbers.
+    """
+    if charge < 1:
+        raise ValueError("charge must be >= 1")
+    step = NEUTRON_MASS / charge
+    if distribution is not None:
+        n_isotopes = min(n_isotopes, distribution.n_peaks)
+        offsets = [float(distribution.spacing[k]) / charge for k in range(n_isotopes)]
+        theoretical = np.asarray(distribution.abundance[:n_isotopes], dtype=float)
+    else:
+        from .deisotope import _poisson_distribution
+        offsets = [k * step for k in range(n_isotopes)]
+        theoretical = _poisson_distribution((mono_mz - PROTON) * charge, n_isotopes)
+
+    targets = {"M-1": mono_mz - step}
+    targets.update({f"M+{k}": mono_mz + offsets[k] for k in range(n_isotopes)})
+    cs = extract_xics(source, targets, tolerance=tolerance, unit=unit, ms_level=1,
+                      rt_range=(rt_center - rt_halfwidth, rt_center + rt_halfwidth),
+                      collect_tic=False)
+
+    mono = cs["M+0"]
+    index = {-1: "M-1", **{k: f"M+{k}" for k in range(n_isotopes)}}
+    span = mono._half_max_span()
+    if span is None:
+        lo, hi = 0, -1
+    else:
+        _apex, _half, lo, hi = span
+    peak_intensity = {k: float(cs[nm].intensity[lo:hi + 1].sum()) for k, nm in index.items()}
+    coelution = {k: coelution_score(mono, cs[nm]) for k, nm in index.items() if k != 0}
+
+    observed = np.array([peak_intensity[k] for k in range(n_isotopes)])
+    norm = float(np.linalg.norm(observed) * np.linalg.norm(theoretical))
+    pattern_cosine = float(np.dot(observed, theoretical) / norm) if norm > 0 else 0.0
+
+    m0 = peak_intensity[0]
+    m_minus_1 = (m0 > 0 and coelution[-1] >= min_coelution
+                 and peak_intensity[-1] / m0 >= min_m_minus_1_ratio)
+
+    return IsotopeTraceEvidence(
+        mono_mz=float(mono_mz), charge=int(charge),
+        apex_rt=mono.apex_rt if span is not None else 0.0,
+        coelution=coelution, peak_intensity=peak_intensity,
+        pattern_cosine=pattern_cosine, m_minus_1_coelutes=bool(m_minus_1),
+        chromatograms=cs)

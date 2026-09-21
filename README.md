@@ -27,7 +27,8 @@ pip install -e ".[dev]"
 |--------|-------------|
 | `reader` | mzML file I/O with indexed and sequential access |
 | `ions` | Ion searching, mass matching, tolerance calculations |
-| `xic` | Extracted ion chromatograms (intensity vs retention time) over a run |
+| `xic` | Extracted ion chromatograms (intensity vs retention time) over a run; isotope co-elution evidence for a precursor |
+| `isotopes` | Exact-composition isotope distributions, for envelopes the averagine cannot express (halogen tags, heavy labels) |
 | `pairing` | MS1 duty-cycle grouping, HCD-EThcD scan pairing |
 | `fragments` | Fragment ion calculator (b/y/c/z/Y/oxonium), peak matching, false match rate |
 | `constants` | Physical constants, amino acid masses, common ion lists |
@@ -78,7 +79,25 @@ print(cs.rt.shape, cs.tic.shape, cs["HexNAc"].max_intensity)
 
 `ms_level=1` gives precursor XICs; `ms_level=2` gives oxonium/fragment XICs (add
 `activation='HCD'` to skip ETD scans, `precursor_mz=...` for a single precursor).
-RT is the reader's native unit (minutes for Thermo msconvert mzML).
+RT is the reader's native unit (minutes for Thermo msconvert mzML). The `ms_level` and
+`rt_range` filters are pushed into the reader (`iter_spectra(ms_level=, rt_range=)`), so a
+spectrum cache never decodes the scans an MS1 XIC would drop.
+
+### Check a precursor's isotopes at the trace level
+
+```python
+from pyteomics import mass
+from mzml_utils import isotope_distribution, isotope_trace_evidence
+
+# Do M+1 / M+2 co-elute with M, and does anything co-elute one isotope BELOW it?
+ev = isotope_trace_evidence("experiment.mzML", 991.5001, 4, rt_center=75.9)
+print(ev.coelution, ev.pattern_cosine, ev.m_minus_1_coelutes)
+
+# An envelope the averagine cannot express: a 4-bromo-Phe peptide (M+2 > M)
+comp = mass.Composition(sequence="TPENFPSK") + mass.Composition({"Br": 1, "H": -1})
+dist = isotope_distribution(comp, n_peaks=3, charge=2)
+print(dist.mz, dist.abundance)          # pass distribution=dist to isotope_trace_evidence
+```
 
 ### Calculate fragment ions
 

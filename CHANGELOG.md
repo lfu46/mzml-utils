@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `iter_spectra(ms_level=, rt_range=)` on both readers; `SpectrumCache` filters in SQL, so an MS1
+  sweep never decodes the MS2 scans. `extract_xics` pushes its filters down when the reader
+  accepts them.
+- `mzml_utils.isotopes`: `isotope_distribution()` computes the isotope envelope of an elemental
+  composition (any element in `pyteomics.mass.nist_mass`), with the centroid mass of each peak.
+- `coelution_score()` and `isotope_trace_evidence()`: trace-level MS1 evidence that a precursor's
+  isotopes co-elute, and whether a trace one isotope below the assigned monoisotopic peak does.
 - `Spectrum.ion_injection_time`, populated by both the indexed mzML reader and the spectrum cache (#2).
 - `XIC.fwhm` and `XIC.points_across_peak` for chromatographic peak-width QC (#3).
 - Isobaric reporter-ion extraction (`mzml_utils.reporters`).
