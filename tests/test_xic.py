@@ -338,3 +338,160 @@ class TestIsotopeTraceEvidence:
         assert not ev.found
         assert ev.pattern_cosine == 0.0
         assert not ev.m_minus_1_coelutes
+
+
+# ---------------------------------------------------------------------------
+# Peak boundaries and quality metrics (ports of Chromatograms / MsQuality /
+# MetaboCoreUtils; tests/data/r_peak_reference.json holds the R values)
+# ---------------------------------------------------------------------------
+
+import json
+import math
+from pathlib import Path
+
+from mzml_utils.xic import peak_boundary, peak_metrics, beta_values, PeakMetrics
+
+_R_REF = json.loads((Path(__file__).parent / "data" / "r_peak_reference.json").read_text())
+
+
+def _gauss(rt, c, s, h):
+    return h * np.exp(-0.5 * ((rt - c) / s) ** 2)
+
+
+class TestRReference:
+    """The port reproduces the R functions run verbatim on the same traces."""
+
+    @pytest.mark.parametrize("name", sorted(_R_REF["traces"]))
+    def test_matches_r(self, name):
+        tr = _R_REF["traces"][name]
+        rt, y, ref = np.array(tr["rt"]), np.array(tr["intensity"]), tr["r"]
+        xic = XIC(target_mz=0.0, rt=rt, intensity=y)
+        left, _apex, right = peak_boundary(xic)
+        assert rt[left] == ref["left_rt"] and rt[right] == ref["right_rt"]
+        seg = slice(left, right + 1)
+        got = dict(zip(("beta_cor_in_boundary", "beta_snr_in_boundary"), beta_values(y[seg], rt[seg])))
+        got.update(zip(("beta_cor_whole", "beta_snr_whole"), beta_values(y, rt)))
+        pm = peak_metrics(xic)
+        got["snr"], got["prominence"] = pm.snr, pm.prominence
+        assert pm.beta_cor == pytest.approx(ref["beta_cor_in_boundary"], rel=1e-12)
+        for k, v in got.items():
+            if ref[k] is None:  # R Inf: MAD or q10 is zero; MsQuality returns NA -> NaN here
+                assert math.isnan(v), k
+            else:
+                assert v == pytest.approx(ref[k], rel=1e-12), k
+
+
+class TestPeakBoundary:
+    def test_valley_between_two_peaks(self):
+        rt = np.linspace(0, 10, 101)
+        y = _gauss(rt, 3, 0.4, 1e5) + _gauss(rt, 6.5, 0.4, 4e4) + 100.0
+        left, apex, right = peak_boundary(XIC(0.0, rt, y))
+        assert rt[apex] == pytest.approx(3.0)
+        assert 4.0 < rt[right] < 6.0  # stops in the valley, not at the second peak
+
+    def test_apex_window_selects_the_smaller_peak(self):
+        rt = np.linspace(0, 10, 101)
+        y = _gauss(rt, 3, 0.4, 1e5) + _gauss(rt, 6.5, 0.4, 4e4) + 100.0 + 0.01 * rt
+        left, apex, right = peak_boundary(XIC(0.0, rt, y), apex_window=(6.0, 7.0))
+        assert rt[apex] == pytest.approx(6.5)
+        assert 4.0 < rt[left] < 6.0
+
+    def test_contains_rt_takes_the_peak_whose_tail_holds_the_ms2(self):
+        # MS2 triggered on the tail, 1 min after the apex: the containing peak is the
+        # big one, not the tallest point near the MS2 time.
+        rt = np.linspace(60, 72, 121)
+        y = (_gauss(rt, 64, 0.8, 3e4) + _gauss(rt, 67.1, 0.25, 1.8e8)
+             + np.where(rt > 67.1, 1.5e7 * np.exp(-(rt - 67.1) / 0.6), 0.0))
+        xic = XIC(0.0, rt, y)
+        left, apex, right = peak_boundary(xic, contains_rt=68.1, nearest_valley=True)
+        assert rt[apex] == pytest.approx(67.1) and rt[left] <= 68.1 <= rt[right]
+        w_left, w_apex, _ = peak_boundary(xic, apex_window=(67.6, 68.6))
+        assert rt[w_apex] > 67.5            # the window picks a tail point
+
+    def test_contains_rt_peels_to_the_smaller_peak(self):
+        rt = np.linspace(0, 10, 101)
+        y = _gauss(rt, 3, 0.4, 1e5) + _gauss(rt, 6.5, 0.4, 4e4) + 100.0 + 0.01 * rt
+        xic = XIC(0.0, rt, y)
+        _l, apex, _r = peak_boundary(xic, contains_rt=6.8)
+        assert rt[apex] == pytest.approx(6.5)
+        assert peak_boundary(xic, contains_rt=50.0) is None       # outside the trace
+        with pytest.raises(ValueError):
+            peak_boundary(xic, contains_rt=6.8, apex_window=(6, 7))
+
+    def test_high_valley_falls_back_to_threshold_on_both_sides(self):
+        rt = np.linspace(0, 10, 101)
+        y = _gauss(rt, 4.6, 0.5, 1e5) + _gauss(rt, 5.6, 0.5, 9e4) + 100.0 + 0.01 * rt
+        left, apex, right = peak_boundary(XIC(0.0, rt, y))
+        # The valley between the two peaks is far above baseline + 10 %, so both
+        # boundaries come from the 10 % threshold and enclose both peaks.
+        assert rt[left] < 4.0 and rt[right] > 6.0
+
+    def test_zero_filled_left_boundary_runs_to_trace_start_in_r_mode(self):
+        rt = np.linspace(0, 10, 101)
+        y = np.where(np.abs(rt - 5) < 1.2, _gauss(rt, 5, 0.35, 2e5), 0.0)
+        xic = XIC(0.0, rt, y)
+        left, _apex, right = peak_boundary(xic)
+        assert left == 0                        # R behaviour, documented
+        l2, _a2, r2 = peak_boundary(xic, nearest_valley=True)
+        # both boundaries are the first zero next to the peak
+        assert y[l2] == 0 and y[l2 + 1] > 0 and y[r2] == 0 and y[r2 - 1] > 0
+        assert r2 == right                      # the right side is unchanged
+
+    def test_nearest_valley_on_noisy_baseline_matches_r(self):
+        tr = _R_REF["traces"]["two_peaks"]
+        xic = XIC(0.0, np.array(tr["rt"]), np.array(tr["intensity"]))
+        assert peak_boundary(xic) == peak_boundary(xic, nearest_valley=True)
+
+    def test_flat_top_is_not_mistaken_for_a_valley(self):
+        rt = np.arange(9, dtype=float)
+        y = np.array([0, 1, 5, 9, 9, 9, 5, 1, 0], dtype=float)
+        assert peak_boundary(XIC(0.0, rt, y), nearest_valley=True) == (0, 3, 8)
+
+    def test_degenerate_inputs(self):
+        assert peak_boundary(XIC(0.0, np.array([1.0, 2.0]), np.array([5.0, 3.0]))) is None
+        assert peak_boundary(XIC(0.0, np.arange(5.0), np.zeros(5))) is None
+        xic = XIC(0.0, np.arange(5.0), np.array([0, 1, 5, 1, 0.0]))
+        assert peak_boundary(xic, apex_window=(10.0, 11.0)) is None
+        with pytest.raises(ValueError):
+            peak_boundary(XIC(0.0, np.arange(5.0), np.array([0, 1, np.nan, 1, 0.0])))
+
+
+class TestPeakMetrics:
+    def test_area_is_within_boundaries_not_whole_trace(self):
+        rt = np.linspace(0, 20, 201)
+        y = _gauss(rt, 5, 0.3, 1e5) + _gauss(rt, 15, 0.3, 1e5)
+        xic = XIC(0.0, rt, y)
+        pm = peak_metrics(xic, nearest_valley=True)
+        one_peak = 1e5 * 0.3 * math.sqrt(2 * math.pi)
+        assert pm.area == pytest.approx(one_peak, rel=1e-3)
+        assert xic.area == pytest.approx(2 * one_peak, rel=1e-3)
+
+    def test_asymmetry_symmetric_and_tailing(self):
+        rt = np.linspace(0, 10, 1001)
+        sym = peak_metrics(XIC(0.0, rt, _gauss(rt, 5, 0.3, 1e5) + 10.0))
+        assert sym.asymmetry == pytest.approx(1.0, abs=0.02)
+        # exponentially modified Gaussian-like tail on the right
+        tail = np.where(rt >= 4, np.exp(-(rt - 4) / 0.8) * (1 - np.exp(-(rt - 4) / 0.15)), 0.0)
+        pm = peak_metrics(XIC(0.0, rt, 1e5 * tail + 10.0))
+        assert pm.asymmetry > 1.5
+
+    def test_fwhm_matches_xic_property_for_the_tallest_peak(self):
+        rt = np.linspace(0, 10, 101)
+        xic = XIC(0.0, rt, _gauss(rt, 5, 0.4, 1e5) + 10.0)
+        pm = peak_metrics(xic)
+        assert pm.fwhm == pytest.approx(xic.fwhm)
+        assert pm.fwhm == pytest.approx(2.3548 * 0.4, rel=0.02)
+        assert pm.points_across_peak == xic.points_across_peak
+
+    def test_beta_cor_high_for_a_peak_low_for_noise(self):
+        rt = np.linspace(0, 1, 41)
+        peak = np.where((rt > 0) & (rt < 1), rt ** 2 * (1 - rt) ** 4, 0.0) * 1e6 + 1.0
+        assert beta_values(peak, rt)[0] > 0.99
+        noise = _R_REF["traces"]["noisy_flat"]
+        assert beta_values(np.array(noise["intensity"]))[0] < 0.5
+
+    def test_no_peak_gives_empty_metrics(self):
+        pm = peak_metrics(XIC(0.0, np.array([]), np.array([])))
+        assert isinstance(pm, PeakMetrics) and not pm.found and math.isnan(pm.apex_rt)
+        d = pm.as_dict()
+        assert "width" in d and "beta_cor" in d

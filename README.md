@@ -27,7 +27,8 @@ pip install -e ".[dev]"
 |--------|-------------|
 | `reader` | mzML file I/O with indexed and sequential access |
 | `ions` | Ion searching, mass matching, tolerance calculations |
-| `xic` | Extracted ion chromatograms (intensity vs retention time) over a run; isotope co-elution evidence for a precursor |
+| `xic` | Extracted ion chromatograms (intensity vs retention time) over a run; isotope co-elution evidence for a precursor; peak boundaries and peak-quality metrics |
+| `chrom_extract` | Peak table → chromatograms across many runs, every row column carried through (the Bioconductor `chromExtract` analogue) |
 | `isotopes` | Exact-composition isotope distributions, for envelopes the averagine cannot express (halogen tags, heavy labels) |
 | `pairing` | MS1 duty-cycle grouping, HCD-EThcD scan pairing |
 | `fragments` | Fragment ion calculator (b/y/c/z/Y/oxonium), peak matching, false match rate |
@@ -98,6 +99,27 @@ comp = mass.Composition(sequence="TPENFPSK") + mass.Composition({"Br": 1, "H": -
 dist = isotope_distribution(comp, n_peaks=3, charge=2)
 print(dist.mz, dist.abundance)          # pass distribution=dist to isotope_trace_evidence
 ```
+
+### Extract a peak table across many runs, with peak metrics
+
+```python
+import pandas as pd
+from mzml_utils import extract_chromatograms, chromatogram_rows
+
+# One row per target: m/z, RT window, run name, plus any annotation columns
+table = psms[["psg", "run", "mz", "rt_min", "rt_max", "ms2_rt"]].to_dict("records")
+res = extract_chromatograms(table, mzml_paths, by="run", apex_rt="ms2_rt",
+                            tolerance=10.0, nearest_valley=True)
+df = pd.DataFrame(chromatogram_rows(res))   # row columns + apex, boundaries, area, FWHM, ...
+```
+
+Each row gets its own m/z and RT window, and one pass per run serves every row of that
+run. Without `by=`, every row is extracted from every run (cross-sample overlays).
+`peak_metrics` / `peak_boundary` port the Chromatograms, MsQuality and MetaboCoreUtils R
+code (boundaries, S/N, prominence, Kumler beta shape) and are pinned against those R
+functions. `apex_rt=` measures the peak whose boundaries contain the MS2 time, and
+`nearest_valley=True` stops R's left boundary from running to the start of a zero-filled
+trace. These are measurements, not verdicts: no threshold is applied.
 
 ### Calculate fragment ions
 
