@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- `mzml_utils.chrom_extract`: `extract_chromatograms()` takes a peak table (rows with an m/z
+  and RT window plus any annotation columns) and extracts one chromatogram per row and run in
+  one pass per run, carrying every row column through; `chromatogram_rows()` flattens the
+  result for a DataFrame. The Python counterpart of `chromExtract()` in the Bioconductor
+  package Chromatograms (Louail et al., Anal Chem 2026).
+- `peak_boundary()`, `peak_metrics()` / `PeakMetrics`, `beta_values()`: peak boundaries,
+  in-boundary area, FWHM, asymmetry, S/N, prominence and Kumler's beta shape metrics, ported
+  from the Chromatograms, MsQuality and MetaboCoreUtils R sources and pinned against them
+  (`tests/data/r_peak_reference.json`). Deviations from R are opt-in: `contains_rt=` (the
+  peak containing an MS2 time), `apex_window=`, `nearest_valley=` (R's left boundary runs to
+  the start of a zero-filled trace).
 - `iter_spectra(ms_level=, rt_range=)` on both readers; `SpectrumCache` filters in SQL, so an MS1
   sweep never decodes the MS2 scans. `extract_xics` pushes its filters down when the reader
   accepts them.
@@ -33,6 +44,8 @@ All notable changes to this project are documented here. The format follows
 - Main-only git workflow: pre-commit branch guard and `scripts/dev-setup.sh`.
 
 ### Fixed
+- `XIC.area` docstring said "peak area"; it integrates the whole trace (use `peak_metrics`
+  for the area between peak boundaries).
 - XIC area under numpy ≥ 2 (the `trapz` fallback was evaluated eagerly).
 - `pyteomics[xml]` is declared as the dependency; a plain `pyteomics` install could not import the package.
 - README development-install clone URL pointed at a non-existent GitHub user (#5).

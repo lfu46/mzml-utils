@@ -99,6 +99,18 @@ from .xic import (
     coelution_score,
     isotope_trace_evidence,
     IsotopeTraceEvidence,
+    peak_boundary,
+    peak_metrics,
+    PeakMetrics,
+    beta_values,
+)
+
+# chrom_extract -- peak table -> chromatograms across many runs (chromExtract analogue)
+from .chrom_extract import (
+    extract_chromatograms,
+    chromatogram_rows,
+    ExtractedChromatogram,
+    source_key,
 )
 
 # canonical match layer
@@ -207,6 +219,15 @@ __all__ = [
     "coelution_score",
     "isotope_trace_evidence",
     "IsotopeTraceEvidence",
+    "peak_boundary",
+    "peak_metrics",
+    "PeakMetrics",
+    "beta_values",
+    # chrom_extract (peak table -> chromatograms across runs)
+    "extract_chromatograms",
+    "chromatogram_rows",
+    "ExtractedChromatogram",
+    "source_key",
     # constants
     "PROTON",
     "H2O",
