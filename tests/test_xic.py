@@ -503,11 +503,13 @@ class TestPeakMetrics:
 
 class TestWindowEdgeIsFloat64:
     def test_float32_mz_arrays_match_a_float64_reference(self):
-        """A SpectrumCache stores m/z as float32. Under NumPy 2's promotion rules (NEP 50)
-        `float32_array - python_float` stays float32, so the target used to be rounded to float32
-        first (~0.06 ppm at m/z 1000) and a peak at the window edge could fall inside on the mzML
-        and outside on its cache. NumPy 1.x promoted the same expression to float64, which is why
-        the float32 reference below casts the target explicitly: the test must bite under either."""
+        """A SpectrumCache stores m/z as float32, and `float32_array - python_float` stays
+        float32 under NumPy 1.x and 2.x alike, so the target used to be rounded to float32 first
+        (~0.06 ppm at m/z 1000) and a peak at the window edge could fall inside on the mzML and
+        outside on its cache. The float32 reference below rounds the target explicitly: an
+        earlier version subtracted the np.linspace float64 SCALAR, which NumPy 2 promotes to
+        float64 (NEP 50) and NumPy 1 demoted, so the reference agreed with float64 on CI and
+        the test recorded no disagreement there."""
         from mzml_utils.xic import _window_intensity
         rng = np.random.default_rng(7)
         mz64 = np.sort(rng.uniform(1190.0, 1210.0, 20000))
