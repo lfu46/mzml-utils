@@ -537,6 +537,26 @@ class TestFindPeaks:
         assert len(two) == 1
         assert y[52] == 0.0                         # the caller's trace is not modified
 
+    def test_bridge_dropouts_helper(self):
+        from mzml_utils import bridge_dropouts
+        y = np.array([0, 4, 0, 8, 0, 0, 2, 0], dtype=float)
+        assert bridge_dropouts(y, 1).tolist() == [0, 4, 6, 8, 0, 0, 2, 0]
+        assert bridge_dropouts(y, 2).tolist() == [0, 4, 6, 8, 6, 4, 2, 0]
+        assert bridge_dropouts(y, 0).tolist() == y.tolist() and y[2] == 0   # input untouched
+
+    def test_peak_metrics_bridged_agrees_with_find_peaks(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.linspace(0, 10, 101)
+        y = np.where(np.abs(rt - 5) < 1.5, _gauss(rt, 5, 0.5, 1e5), 0.0)
+        y[53] = 0.0                                  # a dropout just after the apex
+        xic = XIC(0.0, rt, y)
+        cut = peak_metrics(xic, contains_rt=5.0, nearest_valley=True)
+        assert cut.right_rt == pytest.approx(5.3)    # unbridged: the dropout ends the peak
+        pm = peak_metrics(xic, contains_rt=5.0, nearest_valley=True, bridge_dropouts=1)
+        (p,) = find_peaks(xic, bridge_dropouts=1)
+        assert (pm.left_rt, pm.apex_rt, pm.right_rt) == (p.left_rt, p.apex_rt, p.right_rt)
+        assert pm.n_signal == p.n_signal == pm.n_points - 3   # two empty boundaries + the dropout
+
     def test_n_signal_counts_only_scans_with_the_ion(self):
         from mzml_utils.xic import find_peaks
         rt = np.arange(11, dtype=float)

@@ -104,6 +104,7 @@ from .xic import (
     PeakMetrics,
     find_peaks,
     TracePeak,
+    bridge_dropouts,
     beta_values,
 )
 
@@ -226,6 +227,7 @@ __all__ = [
     "PeakMetrics",
     "find_peaks",
     "TracePeak",
+    "bridge_dropouts",
     "beta_values",
     # chrom_extract (peak table -> chromatograms across runs)
     "extract_chromatograms",
