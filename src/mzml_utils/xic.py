@@ -255,10 +255,11 @@ def _window_intensity(mz: np.ndarray, intensity: np.ndarray, target_mz: float,
         tol_da = tolerance
     else:
         raise ValueError(f"Unknown unit '{unit}'. Use 'ppm' or 'Da'.")
-    # The window edge is tested in float64. A SpectrumCache stores m/z as float32, and
-    # `float32_array - python_float` stays float32 under NumPy's promotion rules, so the
+    # The window edge is tested in float64. A SpectrumCache stores m/z as float32, and under
+    # NumPy 2's promotion rules (NEP 50) `float32_array - python_float` stays float32, so the
     # TARGET was being rounded to float32 first (about 0.06 ppm at m/z 1000) and a peak at the
-    # edge could fall inside on an mzML and outside on the cache built from it.
+    # edge could fall inside on an mzML and outside on the cache built from it. (NumPy 1.x
+    # promoted to float64 and did not show it; the cast makes the result the same under both.)
     mask = np.abs(np.asarray(mz, dtype=np.float64) - target_mz) <= tol_da
     if not mask.any():
         return 0.0
