@@ -790,7 +790,7 @@ def isotope_trace_evidence(source, mono_mz: float, charge: int, *,
                            distribution=None,
                            min_coelution: float = 0.7,
                            min_m_minus_1_ratio: float = 0.1,
-                           span_from: str = "mono") -> IsotopeTraceEvidence:
+                           span_from: Union[str, int] = "mono") -> IsotopeTraceEvidence:
     """Do the isotopes of a precursor co-elute, and is the monoisotopic peak the right one?
 
     A single MS1 scan cannot tell an isotope from an unrelated ion that happens to
@@ -827,9 +827,20 @@ def isotope_trace_evidence(source, mono_mz: float, charge: int, *,
             monoisotope. With ``"strongest"`` the span exists whenever any isotope
             does, ``found`` still reports whether the M trace itself carried signal,
             and ``pattern_cosine`` is computed over the isotopes that were measured.
+            Measured on NGlycoM012 F21, though, ``"strongest"`` RAISED the share of
+            precursors with no monoisotopic signal: in a two-minute window the tallest
+            trace is often another species, whose span excludes the real elution.
+            An ``int`` ``k`` (``0 <= k < n_isotopes``) anchors on the M+k trace: for a
+            DDA precursor isolated on its k-th isotope (the search's isotope offset),
+            that is the species the instrument fragmented and it is present at the
+            MS2 time by construction, which neither the monoisotopic nor the tallest
+            trace can promise. ``k = 0`` is ``"mono"``.
     """
-    if span_from not in ("mono", "strongest"):
-        raise ValueError(f"span_from must be 'mono' or 'strongest', got {span_from!r}")
+    is_index = isinstance(span_from, (int, np.integer)) and not isinstance(span_from, bool)
+    if not is_index and span_from not in ("mono", "strongest"):
+        raise ValueError(f"span_from must be 'mono', 'strongest' or an isotope index, got {span_from!r}")
+    if is_index and not (0 <= int(span_from) < n_isotopes):
+        raise ValueError(f"span_from={span_from} is outside the traced isotopes 0..{n_isotopes - 1}")
     if charge < 1:
         raise ValueError("charge must be >= 1")
     step = NEUTRON_MASS / charge
@@ -851,7 +862,9 @@ def isotope_trace_evidence(source, mono_mz: float, charge: int, *,
     mono = cs["M+0"]
     index = {-1: "M-1", **{k: f"M+{k}" for k in range(n_isotopes)}}
     span_trace = 0
-    if span_from == "strongest":
+    if is_index:
+        span_trace = int(span_from)
+    elif span_from == "strongest":
         tallest = {k: (float(np.max(cs[nm].intensity)) if len(cs[nm].intensity) else 0.0)
                    for k, nm in index.items() if k >= 0}
         if any(v > 0.0 for v in tallest.values()):
