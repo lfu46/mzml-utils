@@ -456,6 +456,118 @@ class TestPeakBoundary:
             peak_boundary(XIC(0.0, np.arange(5.0), np.array([0, 1, np.nan, 1, 0.0])))
 
 
+class TestFindPeaks:
+    """find_peaks lists every separate peak; peak_boundary measures one."""
+
+    def test_two_separated_peaks_tallest_first(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.linspace(0, 10, 101)
+        y = _gauss(rt, 3, 0.4, 1e5) + _gauss(rt, 6.5, 0.4, 6e4) + 100.0 + 0.01 * rt
+        xic = XIC(0.0, rt, y)
+        peaks = find_peaks(xic)
+        assert [round(p.apex_rt, 6) for p in peaks] == [3.0, 6.5]
+        assert peaks[0].rel_height == 1.0 and 0.55 < peaks[1].rel_height < 0.65
+        # The tallest peak is the one peak_boundary measures with the same arguments.
+        left, apex, right = peak_boundary(xic, nearest_valley=True)
+        assert (peaks[0].left_rt, peaks[0].apex_rt, peaks[0].right_rt) == (rt[left], rt[apex], rt[right])
+        assert peaks[0].contains(3.4) and not peaks[0].contains(6.5) and peaks[1].contains(6.5)
+
+    def test_boundaries_never_overlap(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.linspace(0, 12, 121)
+        y = (_gauss(rt, 3, 0.5, 1e5) + _gauss(rt, 5.2, 0.5, 7e4) + _gauss(rt, 8, 0.4, 5e4)
+             + 100.0 + 0.01 * rt)
+        peaks = sorted(find_peaks(XIC(0.0, rt, y), min_rel_height=0.0), key=lambda p: p.apex_rt)
+        for a, b in zip(peaks, peaks[1:]):
+            assert a.right_rt <= b.left_rt          # may share a boundary scan, never overlap
+
+    def test_min_rel_height_and_max_peaks(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.linspace(0, 12, 121)
+        y = (_gauss(rt, 3, 0.4, 1e5) + _gauss(rt, 6, 0.4, 5e4) + _gauss(rt, 9, 0.4, 1e4)
+             + 100.0 + 0.01 * rt)
+        xic = XIC(0.0, rt, y)
+        assert len(find_peaks(xic, min_rel_height=0.05)) == 3
+        assert [round(p.apex_rt, 6) for p in find_peaks(xic)] == [3.0, 6.0]     # 0.1 < 0.2
+        assert [round(p.apex_rt, 6) for p in find_peaks(xic, max_peaks=1)] == [3.0]
+
+    def test_partly_resolved_high_valley_is_one_peak(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.linspace(0, 10, 101)
+        y = _gauss(rt, 4.6, 0.5, 1e5) + _gauss(rt, 5.6, 0.5, 9e4) + 100.0 + 0.01 * rt
+        peaks = find_peaks(XIC(0.0, rt, y))
+        assert len(peaks) == 1 and peaks[0].left_rt < 4.0 and peaks[0].right_rt > 6.0
+
+    def test_zero_floor_is_not_counted_inside_a_peak_with_nearest_valley(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.linspace(0, 10, 101)
+        y = np.where(np.abs(rt - 3) < 1.0, _gauss(rt, 3, 0.3, 5e4), 0.0)
+        y = y + np.where(np.abs(rt - 7) < 1.0, _gauss(rt, 7, 0.3, 1e5), 0.0)
+        xic = XIC(0.0, rt, y)
+        peaks = find_peaks(xic)
+        assert [round(p.apex_rt, 6) for p in peaks] == [7.0, 3.0]
+        assert peaks[0].left_rt == pytest.approx(6.0) and not peaks[1].is_truncated
+        # R's walk crosses the flat zero floor: the tallest peak's left boundary lands
+        # at the smaller peak's foot, and the smaller one's runs to the trace start.
+        r_mode = find_peaks(xic, nearest_valley=False)
+        assert [round(p.apex_rt, 6) for p in r_mode] == [7.0, 3.0]
+        assert r_mode[0].left_rt == pytest.approx(4.0) and r_mode[0].n_points > peaks[0].n_points
+        assert r_mode[1].left_rt == 0.0 and r_mode[1].is_truncated
+
+    def test_internal_dropout_splits_one_elution(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.linspace(0, 10, 101)
+        y = np.where(np.abs(rt - 5) < 1.5, _gauss(rt, 5, 0.5, 1e5), 0.0)
+        y[52] = 0.0                                 # one scan without the ion
+        peaks = find_peaks(XIC(0.0, rt, y))
+        assert len(peaks) == 2                      # documented: look at the trace
+        a, b = sorted(peaks, key=lambda p: p.apex_rt)
+        assert a.right_rt == b.left_rt == rt[52]
+
+    def test_bridge_dropouts_rejoins_the_split_elution(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.linspace(0, 10, 101)
+        y = np.where(np.abs(rt - 5) < 1.5, _gauss(rt, 5, 0.5, 1e5), 0.0)
+        y[52] = 0.0
+        y[55:57] = 0.0                              # a two-scan gap: bridged only with k >= 2
+        one = find_peaks(XIC(0.0, rt, y), bridge_dropouts=1)
+        assert len(one) == 2 and one[0].apex_rt == pytest.approx(5.0)
+        assert one[0].n_signal == one[0].n_points - 2 - 1   # boundaries and the bridged scan
+        two = find_peaks(XIC(0.0, rt, y), bridge_dropouts=2)
+        assert len(two) == 1
+        assert y[52] == 0.0                         # the caller's trace is not modified
+
+    def test_n_signal_counts_only_scans_with_the_ion(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.arange(11, dtype=float)
+        y = np.array([0, 0, 0, 0, 0, 7, 0, 0, 0, 0, 0], dtype=float)
+        (p,) = find_peaks(XIC(0.0, rt, y))
+        assert (p.n_points, p.n_signal) == (3, 1)
+        pm = peak_metrics(XIC(0.0, rt, y), nearest_valley=True)
+        assert (pm.n_points, pm.n_signal) == (3, 1)
+
+    def test_flat_top_is_one_peak(self):
+        from mzml_utils.xic import find_peaks
+        rt = np.arange(9, dtype=float)
+        y = np.array([0, 1, 5, 9, 9, 9, 5, 1, 0], dtype=float)
+        peaks = find_peaks(XIC(0.0, rt, y), min_rel_height=0.0)
+        assert len(peaks) == 1 and peaks[0].apex_rt == 3.0 and peaks[0].n_points == 9
+        assert peaks[0].area == pytest.approx(float(np.trapezoid(y, rt)) if hasattr(np, "trapezoid")
+                                              else float(np.trapz(y, rt)))
+
+    def test_degenerate_inputs(self):
+        from mzml_utils.xic import find_peaks
+        assert find_peaks(XIC(0.0, np.array([1.0, 2.0]), np.array([5.0, 3.0]))) == []
+        assert find_peaks(XIC(0.0, np.arange(5.0), np.zeros(5))) == []
+        assert find_peaks(XIC(0.0, np.arange(5.0), np.array([0, 1, 5, 1, 0.0])), max_peaks=0) == []
+        with pytest.raises(ValueError):
+            find_peaks(XIC(0.0, np.arange(5.0), np.array([0, 1, np.nan, 1, 0.0])))
+
+    def test_exported_at_package_level(self):
+        import mzml_utils
+        assert mzml_utils.find_peaks is not None and mzml_utils.TracePeak is not None
+
+
 class TestPeakMetrics:
     def test_area_is_within_boundaries_not_whole_trace(self):
         rt = np.linspace(0, 20, 201)
