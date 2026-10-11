@@ -580,3 +580,24 @@ class TestSpanFromStrongest:
         with pytest.raises(ValueError, match="span_from"):
             isotope_trace_evidence(_envelope_reader(self.MONO, self.Z, [1.0, 0.5]), self.MONO,
                                    self.Z, rt_center=20.3, span_from="loudest")
+        with pytest.raises(ValueError, match="outside"):
+            isotope_trace_evidence(_envelope_reader(self.MONO, self.Z, [1.0, 0.5]), self.MONO,
+                                   self.Z, rt_center=20.3, span_from=3)
+
+    def test_integer_span_anchors_on_the_isolated_isotope_not_the_tallest(self):
+        """The precursor was isolated on M+1 (the search's offset k=1). A bigger unrelated ion
+        at the M+2 m/z elutes 0.4 min later in the window: 'strongest' anchors on it and misses
+        the real elution, k=1 anchors on the species that was fragmented."""
+        step = NEUTRON_MASS / self.Z
+        other = (self.MONO + 2 * step, [0, 0, 0, 0, 80, 300, 200])   # tall, late, unrelated
+        reader = _envelope_reader(self.MONO, self.Z, [0.3, 1.0, 0.6], extra=other)
+        strong = isotope_trace_evidence(reader, self.MONO, self.Z, rt_center=20.3,
+                                        rt_halfwidth=1.0, span_from="strongest")
+        iso = isotope_trace_evidence(reader, self.MONO, self.Z, rt_center=20.3,
+                                     rt_halfwidth=1.0, span_from=1)
+        assert strong.span_trace == 2 and strong.apex_rt > 20.4     # pulled onto the interferent
+        assert iso.span_trace == 1 and iso.apex_rt == pytest.approx(20.3)
+        assert iso.found and iso.peak_intensity[0] > 0
+        assert iso.coelution[0] == pytest.approx(1.0)
+        assert isotope_trace_evidence(reader, self.MONO, self.Z, rt_center=20.3,
+                                      span_from=0).span_trace == 0        # k=0 is 'mono'
