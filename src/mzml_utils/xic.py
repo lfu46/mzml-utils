@@ -459,6 +459,30 @@ def _bounds_from_apex(inten: np.ndarray, apex: int, baseline: float, threshold: 
     return int(left), int(right)
 
 
+def bridge_dropouts(intensity, max_gap: int = 1) -> np.ndarray:
+    """A copy of ``intensity`` with every run of at most ``max_gap`` zero scans that has signal
+    on both sides filled by linear interpolation between its neighbours.
+
+    A zero-filled XIC writes 0 for a scan without the ion. Near the Orbitrap's noise floor a
+    single scan inside an elution often lacks the centroid, and every valley walk stops there,
+    splitting one elution in two. Bridging rejoins it. Interpolated values lie between their
+    neighbours, so no maximum is created or moved. Leading and trailing zeros, and longer gaps,
+    are left as they are. ``max_gap=0`` returns an unchanged copy.
+    """
+    return _bridge_gaps(np.asarray(intensity, dtype=float), int(max_gap))
+
+
+def _bridge_gaps(raw: np.ndarray, max_gap: int) -> np.ndarray:
+    out = raw.copy()
+    if max_gap <= 0:
+        return out
+    nz = np.flatnonzero(raw > 0)
+    for a, b in zip(nz[:-1], nz[1:]):
+        if 1 < b - a <= max_gap + 1:
+            out[a + 1:b] = np.interp(np.arange(a + 1, b), [a, b], [raw[a], raw[b]])
+    return out
+
+
 def peak_boundary(xic: "XIC", *,
                   contains_rt: Optional[float] = None,
                   apex_window: Optional[Tuple[float, float]] = None,
@@ -670,7 +694,8 @@ def peak_metrics(xic: "XIC", *,
                  threshold: float = 0.1,
                  baseline_threshold: float = 0.1,
                  baseline_quantile: float = 0.1,
-                 nearest_valley: bool = False) -> PeakMetrics:
+                 nearest_valley: bool = False,
+                 bridge_dropouts: int = 0) -> PeakMetrics:
     """Boundaries, in-boundary area and quality metrics of one peak in an XIC.
 
     The boundary arguments are those of :func:`peak_boundary`: ``contains_rt`` (or
@@ -687,8 +712,18 @@ def peak_metrics(xic: "XIC", *,
       half (MAD) or a tenth (q10) of the trace is zero, as MsQuality returns NA --
       common for a zero-filled XIC over a wide window.
 
+    ``bridge_dropouts=k`` measures the trace after :func:`bridge_dropouts` (runs of at most k
+    zero scans with signal on both sides filled), as :func:`find_peaks` does, so the two agree
+    on one zero-filled trace; every metric then comes from the bridged trace except
+    ``n_signal``, which counts the scans where the ORIGINAL trace has the ion. The default 0
+    reproduces R.
+
     These are measurements, not verdicts: no threshold is applied here.
     """
+    raw = np.asarray(xic.intensity, dtype=float)
+    if bridge_dropouts > 0:
+        xic = XIC(target_mz=xic.target_mz, rt=np.asarray(xic.rt, dtype=float),
+                  intensity=_bridge_gaps(raw, int(bridge_dropouts)))
     b = peak_boundary(xic, contains_rt=contains_rt, apex_window=apex_window, threshold=threshold,
                       baseline_threshold=baseline_threshold,
                       baseline_quantile=baseline_quantile,
@@ -720,7 +755,7 @@ def peak_metrics(xic: "XIC", *,
     snr = apex_int / mad if mad > 0 else float("nan")
     q10 = float(np.quantile(inten, baseline_quantile))
     prominence = (apex_int - q10) / q10 if q10 > 0 else float("nan")
-    n_signal = int(np.count_nonzero(seg_int > q10))
+    n_signal = int(np.count_nonzero(raw[left:right + 1] > q10))
 
     beta_cor, beta_snr = beta_values(seg_int, seg_rt) if len(seg_int) >= 5 else (float("nan"),) * 2
 
@@ -812,12 +847,7 @@ def find_peaks(xic: "XIC", *,
     if n < 3 or max_peaks < 1:
         return []
     raw = inten
-    if bridge_dropouts > 0:
-        inten = inten.copy()
-        nz = np.flatnonzero(raw > 0)
-        for a, b in zip(nz[:-1], nz[1:]):
-            if 1 < b - a <= bridge_dropouts + 1:
-                inten[a + 1:b] = np.interp(np.arange(a + 1, b), [a, b], [raw[a], raw[b]])
+    inten = _bridge_gaps(raw, int(bridge_dropouts))
     baseline = float(np.quantile(inten, baseline_quantile))  # as peak_boundary
     prev_ok = np.r_[True, inten[1:] >= inten[:-1]]
     next_ok = np.r_[inten[:-1] >= inten[1:], True]
