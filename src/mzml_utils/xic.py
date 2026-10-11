@@ -630,6 +630,11 @@ class PeakMetrics:
     """A boundary sits on an end of the trace: the extraction window cut the peak."""
     n_points: int = 0
     """Scans between the boundaries, inclusive."""
+    n_signal: int = 0
+    """Scans between the boundaries whose intensity is above the trace baseline (the
+    ``baseline_quantile`` quantile): the scans where the ion was seen. ``n_points``
+    also counts the boundary scans, which on a zero-filled trace are the empty scans on
+    either side, so a one-scan blip has ``n_points`` 3 and ``n_signal`` 1."""
     area: float = 0.0
     """Trapezoidal area between the boundaries."""
     fwhm: float = float("nan")
@@ -715,16 +720,144 @@ def peak_metrics(xic: "XIC", *,
     snr = apex_int / mad if mad > 0 else float("nan")
     q10 = float(np.quantile(inten, baseline_quantile))
     prominence = (apex_int - q10) / q10 if q10 > 0 else float("nan")
+    n_signal = int(np.count_nonzero(seg_int > q10))
 
     beta_cor, beta_snr = beta_values(seg_int, seg_rt) if len(seg_int) >= 5 else (float("nan"),) * 2
 
     return PeakMetrics(apex_rt=apex_rt, apex_intensity=apex_int,
                        left_rt=float(rt[left]), right_rt=float(rt[right]),
                        boundary_is_truncated=(left == 0 or right == len(inten) - 1),
-                       n_points=int(right - left + 1), area=area,
+                       n_points=int(right - left + 1), n_signal=n_signal, area=area,
                        fwhm=fwhm, fwhm_is_truncated=fwhm_trunc, points_across_peak=pts,
                        asymmetry=asym, snr=snr, prominence=prominence,
                        beta_cor=beta_cor, beta_snr=beta_snr)
+
+
+@dataclass
+class TracePeak:
+    """One peak of an XIC, as found by :func:`find_peaks`.
+
+    Retention times are in the trace's unit (minutes).
+    """
+
+    apex_rt: float
+    apex_intensity: float
+    left_rt: float
+    right_rt: float
+    n_points: int
+    """Scans between the boundaries, inclusive."""
+    n_signal: int
+    """Scans between the boundaries whose intensity in the ORIGINAL trace is above the
+    baseline: scans where the ion was seen. A bridged dropout is not counted."""
+    area: float
+    """Trapezoidal area between the boundaries."""
+    rel_height: float
+    """Height above baseline relative to the tallest peak's: 1.0 for the tallest."""
+    is_truncated: bool
+    """A boundary sits on an end of the trace: the extraction window cut the peak."""
+
+    def contains(self, rt: float) -> bool:
+        return self.left_rt <= rt <= self.right_rt
+
+
+def find_peaks(xic: "XIC", *,
+               min_rel_height: float = 0.2,
+               max_peaks: int = 5,
+               threshold: float = 0.1,
+               baseline_threshold: float = 0.1,
+               baseline_quantile: float = 0.1,
+               nearest_valley: bool = True,
+               bridge_dropouts: int = 0) -> List[TracePeak]:
+    """Every separate peak in an XIC, tallest first, with boundaries that never overlap.
+
+    :func:`peak_boundary` measures ONE peak. A glycopeptide XIC often holds more than
+    one (an isomer, a +/-1 Da neighbour, a second elution), and a reader who sees only
+    the peak that contains the MS2 time cannot tell that another, perhaps taller,
+    peak sits a minute away. This lists them all.
+
+    Candidates are the trace's local maxima above the baseline. Taken tallest first,
+    each is bounded exactly as :func:`peak_boundary` bounds its apex (same baseline
+    quantile, valley walk and threshold fallback), and a boundary is clipped where it
+    would run into a peak already found, so neighbours may share a boundary scan but
+    never overlap. A local maximum inside an earlier peak's boundaries is a shoulder or
+    noise on that peak and is not reported separately; in particular two partly
+    resolved peaks whose valley stays above ``baseline_threshold`` are ONE peak, as in
+    R. The walk stops after ``max_peaks`` peaks, or at the first candidate whose height
+    above baseline is below ``min_rel_height`` of the tallest's.
+
+    The tallest peak is the one :func:`peak_boundary` returns with the same arguments
+    and no selector. ``nearest_valley`` defaults to True here, unlike there: on a
+    zero-filled trace R's left walk crosses the whole flat floor, to the foot of the
+    next peak or the trace start, so boundaries, ``n_points`` and ``is_truncated``
+    would describe empty scans rather than the elution.
+
+    An internal dropout (a scan inside a peak where the ion is absent, intensity 0)
+    cuts every valley walk, so it splits one elution into two peaks that share a
+    zero-intensity boundary scan. ``bridge_dropouts=k`` fills every run of at most
+    ``k`` zero scans that has signal on both sides by linear interpolation before the
+    peaks are found; apexes, areas and boundaries then come from the bridged trace and
+    ``n_signal`` from the original. On a low-abundance glyco MS1 trace one-scan
+    dropouts are common (the Orbitrap drops centroids near its noise floor), so
+    ``bridge_dropouts=1`` is the usual setting there; the default 0 leaves the trace
+    as extracted. Look at the trace before reading two adjacent peaks as two species.
+    These are measurements, not verdicts.
+
+    Returns ``[]`` for fewer than 3 points or a trace with nothing above baseline.
+    """
+    inten = np.asarray(xic.intensity, dtype=float)
+    rt = np.asarray(xic.rt, dtype=float)
+    n = len(inten)
+    if np.isnan(inten).any():
+        raise ValueError("find_peaks: intensity contains NaN (write 0 for an absent ion)")
+    if n < 3 or max_peaks < 1:
+        return []
+    raw = inten
+    if bridge_dropouts > 0:
+        inten = inten.copy()
+        nz = np.flatnonzero(raw > 0)
+        for a, b in zip(nz[:-1], nz[1:]):
+            if 1 < b - a <= bridge_dropouts + 1:
+                inten[a + 1:b] = np.interp(np.arange(a + 1, b), [a, b], [raw[a], raw[b]])
+    baseline = float(np.quantile(inten, baseline_quantile))  # as peak_boundary
+    prev_ok = np.r_[True, inten[1:] >= inten[:-1]]
+    next_ok = np.r_[inten[:-1] >= inten[1:], True]
+    cand = np.flatnonzero((inten > baseline) & prev_ok & next_ok)
+    if cand.size == 0:
+        return []
+    # Tallest first; equal heights keep index order, so the first is np.argmax's choice.
+    cand = cand[np.argsort(-inten[cand], kind="stable")]
+    top = float(inten[cand[0]]) - baseline
+
+    found: List[Tuple[int, int, int]] = []
+    for a in cand:
+        a = int(a)
+        rel = (float(inten[a]) - baseline) / top
+        if rel < min_rel_height:
+            break
+        if any(l <= a <= r for l, _, r in found):
+            continue
+        left, right = _bounds_from_apex(inten, a, baseline, threshold, baseline_threshold,
+                                        nearest_valley)
+        for l2, _, r2 in found:
+            if r2 < a:
+                left = max(left, r2)
+            elif l2 > a:
+                right = min(right, l2)
+        found.append((left, a, right))
+        if len(found) == max_peaks:
+            break
+
+    peaks = []
+    for left, a, right in found:
+        area = float(_trapz(inten[left:right + 1], rt[left:right + 1])) if right > left else 0.0
+        peaks.append(TracePeak(apex_rt=float(rt[a]), apex_intensity=float(inten[a]),
+                               left_rt=float(rt[left]), right_rt=float(rt[right]),
+                               n_points=int(right - left + 1),
+                               n_signal=int(np.count_nonzero(raw[left:right + 1] > baseline)),
+                               area=area,
+                               rel_height=(float(inten[a]) - baseline) / top,
+                               is_truncated=(left == 0 or right == n - 1)))
+    return peaks
 
 
 # ---------------------------------------------------------------------------
