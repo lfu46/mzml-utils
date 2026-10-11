@@ -503,9 +503,11 @@ class TestPeakMetrics:
 
 class TestWindowEdgeIsFloat64:
     def test_float32_mz_arrays_match_a_float64_reference(self):
-        """A SpectrumCache stores m/z as float32. `float32 - python_float` stays float32 under
-        NumPy promotion, so the target used to be rounded to float32 first (~0.06 ppm at m/z 1000)
-        and a peak at the window edge could fall inside on the mzML and outside on its cache."""
+        """A SpectrumCache stores m/z as float32. Under NumPy 2's promotion rules (NEP 50)
+        `float32_array - python_float` stays float32, so the target used to be rounded to float32
+        first (~0.06 ppm at m/z 1000) and a peak at the window edge could fall inside on the mzML
+        and outside on its cache. NumPy 1.x promoted the same expression to float64, which is why
+        the float32 reference below casts the target explicitly: the test must bite under either."""
         from mzml_utils.xic import _window_intensity
         rng = np.random.default_rng(7)
         mz64 = np.sort(rng.uniform(1190.0, 1210.0, 20000))
@@ -514,8 +516,9 @@ class TestWindowEdgeIsFloat64:
         disagreements = 0
         for target in np.linspace(1195.0, 1205.0, 400):
             tol_da = target * 10.0 / 1e6
-            # What a float32 subtraction would have decided, and what float64 decides.
-            f32 = float(inten[np.abs(mz32 - target) <= tol_da].sum())
+            # What a float32 subtraction decides (target rounded to float32, as NumPy 2 does
+            # implicitly), and what float64 decides.
+            f32 = float(inten[np.abs(mz32 - np.float32(target)) <= tol_da].sum())
             f64 = float(inten[np.abs(mz32.astype(np.float64) - target) <= tol_da].sum())
             got = _window_intensity(mz32, inten, float(target), 10.0, "ppm", "sum")
             assert got == f64, target
