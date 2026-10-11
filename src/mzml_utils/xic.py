@@ -255,7 +255,11 @@ def _window_intensity(mz: np.ndarray, intensity: np.ndarray, target_mz: float,
         tol_da = tolerance
     else:
         raise ValueError(f"Unknown unit '{unit}'. Use 'ppm' or 'Da'.")
-    mask = np.abs(mz - target_mz) <= tol_da
+    # The window edge is tested in float64. A SpectrumCache stores m/z as float32, and
+    # `float32_array - python_float` stays float32 under NumPy's promotion rules, so the
+    # TARGET was being rounded to float32 first (about 0.06 ppm at m/z 1000) and a peak at the
+    # edge could fall inside on an mzML and outside on the cache built from it.
+    mask = np.abs(np.asarray(mz, dtype=np.float64) - target_mz) <= tol_da
     if not mask.any():
         return 0.0
     vals = intensity[mask]
@@ -756,15 +760,20 @@ class IsotopeTraceEvidence:
     apex_rt: float
     """Apex of the monoisotopic trace inside the window (0.0 when it is empty)."""
     coelution: Dict[int, float]
-    """Cosine of each isotope trace with the monoisotopic trace (index 0 omitted)."""
+    """Cosine of each isotope trace with the span-defining trace (``span_trace``, omitted
+    from the dict): the monoisotopic trace by default."""
     peak_intensity: Dict[int, float]
-    """Intensity of each isotope summed over the monoisotopic peak's half-maximum span."""
+    """Intensity of each isotope summed over the span-defining trace's half-maximum span."""
     pattern_cosine: float
     """Cosine of the observed M, M+1, ... intensities against the theoretical envelope."""
     m_minus_1_coelutes: bool
     """True when a trace one isotope step BELOW the assigned monoisotopic m/z co-elutes
-    with it -- the assigned peak is then probably M+1 of a lighter species."""
+    with the envelope and is at least ``min_m_minus_1_ratio`` of the span-defining trace --
+    the assigned peak is then probably M+1 of a lighter species."""
     chromatograms: ChromatogramSet
+    span_trace: int = 0
+    """Isotope index of the trace whose half-maximum span the intensities were summed over:
+    0 (the monoisotopic trace) by default, the tallest trace with ``span_from="strongest"``."""
 
     @property
     def found(self) -> bool:
@@ -777,7 +786,8 @@ def isotope_trace_evidence(source, mono_mz: float, charge: int, *,
                            tolerance: float = 10.0, unit: str = "ppm",
                            distribution=None,
                            min_coelution: float = 0.7,
-                           min_m_minus_1_ratio: float = 0.1) -> IsotopeTraceEvidence:
+                           min_m_minus_1_ratio: float = 0.1,
+                           span_from: str = "mono") -> IsotopeTraceEvidence:
     """Do the isotopes of a precursor co-elute, and is the monoisotopic peak the right one?
 
     A single MS1 scan cannot tell an isotope from an unrelated ion that happens to
@@ -804,7 +814,19 @@ def isotope_trace_evidence(source, mono_mz: float, charge: int, *,
         min_m_minus_1_ratio: Minimum M-1 / M intensity ratio for the same verdict; a
             real lighter monoisotopic peak is rarely below this under ~8 kDa. Both
             are screening defaults, not calibrated thresholds -- read the numbers.
+        span_from: Which trace defines the elution span over which the per-isotope
+            intensities are summed. ``"mono"`` (default, unchanged) uses the M trace.
+            ``"strongest"`` uses whichever of M, M+1, ... has the tallest point, and
+            records it as ``span_trace``. For a large glycopeptide the monoisotopic
+            peak is often the WEAKEST of the envelope, or absent at the noise floor
+            while M+1 and M+2 are clear; anchoring the span on it then yields an empty
+            span and a precursor that reads as absent rather than as a weak
+            monoisotope. With ``"strongest"`` the span exists whenever any isotope
+            does, ``found`` still reports whether the M trace itself carried signal,
+            and ``pattern_cosine`` is computed over the isotopes that were measured.
     """
+    if span_from not in ("mono", "strongest"):
+        raise ValueError(f"span_from must be 'mono' or 'strongest', got {span_from!r}")
     if charge < 1:
         raise ValueError("charge must be >= 1")
     step = NEUTRON_MASS / charge
@@ -825,25 +847,36 @@ def isotope_trace_evidence(source, mono_mz: float, charge: int, *,
 
     mono = cs["M+0"]
     index = {-1: "M-1", **{k: f"M+{k}" for k in range(n_isotopes)}}
-    span = mono._half_max_span()
+    span_trace = 0
+    if span_from == "strongest":
+        tallest = {k: (float(np.max(cs[nm].intensity)) if len(cs[nm].intensity) else 0.0)
+                   for k, nm in index.items() if k >= 0}
+        if any(v > 0.0 for v in tallest.values()):
+            span_trace = max(tallest, key=tallest.get)
+    anchor = cs[index[span_trace]]
+    span = anchor._half_max_span()
     if span is None:
         lo, hi = 0, -1
     else:
         _apex, _half, lo, hi = span
     peak_intensity = {k: float(cs[nm].intensity[lo:hi + 1].sum()) for k, nm in index.items()}
-    coelution = {k: coelution_score(mono, cs[nm]) for k, nm in index.items() if k != 0}
+    # Co-elution is measured against the span-defining trace: M by default (unchanged), the
+    # tallest isotope with span_from="strongest". Against an absent M every cosine is 0 and
+    # nothing can be learned; against the tallest isotope, a lighter species that co-elutes
+    # with the envelope is still visible when the assigned monoisotopic peak itself is missing.
+    coelution = {k: coelution_score(anchor, cs[nm]) for k, nm in index.items() if k != span_trace}
 
     observed = np.array([peak_intensity[k] for k in range(n_isotopes)])
     norm = float(np.linalg.norm(observed) * np.linalg.norm(theoretical))
     pattern_cosine = float(np.dot(observed, theoretical) / norm) if norm > 0 else 0.0
 
-    m0 = peak_intensity[0]
-    m_minus_1 = (m0 > 0 and coelution[-1] >= min_coelution
-                 and peak_intensity[-1] / m0 >= min_m_minus_1_ratio)
+    ref = peak_intensity[span_trace]
+    m_minus_1 = (ref > 0 and coelution[-1] >= min_coelution
+                 and peak_intensity[-1] / ref >= min_m_minus_1_ratio)
 
     return IsotopeTraceEvidence(
         mono_mz=float(mono_mz), charge=int(charge),
-        apex_rt=mono.apex_rt if span is not None else 0.0,
+        apex_rt=anchor.apex_rt if span is not None else 0.0,
         coelution=coelution, peak_intensity=peak_intensity,
         pattern_cosine=pattern_cosine, m_minus_1_coelutes=bool(m_minus_1),
-        chromatograms=cs)
+        chromatograms=cs, span_trace=int(span_trace))

@@ -495,3 +495,83 @@ class TestPeakMetrics:
         assert isinstance(pm, PeakMetrics) and not pm.found and math.isnan(pm.apex_rt)
         d = pm.as_dict()
         assert "width" in d and "beta_cor" in d
+
+
+# ---------------------------------------------------------------------------
+# Window edge in float64; span from the strongest isotope trace
+# ---------------------------------------------------------------------------
+
+class TestWindowEdgeIsFloat64:
+    def test_float32_mz_arrays_match_a_float64_reference(self):
+        """A SpectrumCache stores m/z as float32. `float32 - python_float` stays float32 under
+        NumPy promotion, so the target used to be rounded to float32 first (~0.06 ppm at m/z 1000)
+        and a peak at the window edge could fall inside on the mzML and outside on its cache."""
+        from mzml_utils.xic import _window_intensity
+        rng = np.random.default_rng(7)
+        mz64 = np.sort(rng.uniform(1190.0, 1210.0, 20000))
+        mz32 = mz64.astype(np.float32)
+        inten = np.ones_like(mz64)
+        disagreements = 0
+        for target in np.linspace(1195.0, 1205.0, 400):
+            tol_da = target * 10.0 / 1e6
+            # What a float32 subtraction would have decided, and what float64 decides.
+            f32 = float(inten[np.abs(mz32 - target) <= tol_da].sum())
+            f64 = float(inten[np.abs(mz32.astype(np.float64) - target) <= tol_da].sum())
+            got = _window_intensity(mz32, inten, float(target), 10.0, "ppm", "sum")
+            assert got == f64, target
+            disagreements += int(f32 != f64)
+        # The test has teeth only if float32 math would have differed somewhere in the sweep.
+        assert disagreements > 0
+
+
+class TestSpanFromStrongest:
+    MONO, Z = 1204.5640, 3
+
+    def test_default_is_unchanged_and_anchors_on_the_monoisotope(self):
+        ev = isotope_trace_evidence(_envelope_reader(self.MONO, self.Z, [1.0, 0.9, 0.5]),
+                                    self.MONO, self.Z, rt_center=20.3)
+        assert ev.span_trace == 0
+        assert ev.found and ev.apex_rt == pytest.approx(20.3)
+
+    def test_absent_monoisotope_still_yields_a_span_from_m_plus_1(self):
+        """M+0 at the noise floor, M+1 and M+2 clear: with 'mono' the span is empty and the
+        precursor reads as absent; with 'strongest' the isotopes that exist are measured and
+        `found` still says the M trace itself carried nothing."""
+        reader = _envelope_reader(self.MONO, self.Z, [0.0, 1.0, 0.6])
+        mono = isotope_trace_evidence(reader, self.MONO, self.Z, rt_center=20.3)
+        assert not mono.found and mono.apex_rt == 0.0 and mono.pattern_cosine == 0.0
+        strong = isotope_trace_evidence(reader, self.MONO, self.Z, rt_center=20.3,
+                                        span_from="strongest")
+        assert strong.span_trace == 1
+        assert not strong.found                              # M itself is still absent
+        assert strong.apex_rt == pytest.approx(20.3)
+        assert strong.peak_intensity[1] > 0 and strong.peak_intensity[2] > 0
+        # Co-elution is against the span-defining trace, so M+1 is omitted and M+2 scores 1.
+        assert 1 not in strong.coelution and 0 in strong.coelution
+        assert strong.coelution[2] == pytest.approx(1.0)
+        assert strong.pattern_cosine > 0.0
+
+    def test_lighter_species_is_flagged_even_when_the_assigned_monoisotope_is_absent(self):
+        """The assigned M is missing but a trace one step below co-elutes with M+1 and M+2: the
+        assignment is one neutron too heavy. 'mono' cannot see it (nothing to compare against);
+        'strongest' can."""
+        step = NEUTRON_MASS / self.Z
+        reader = _envelope_reader(self.MONO - step, self.Z, [0.6, 0.0, 0.8, 0.4])
+        assert not isotope_trace_evidence(reader, self.MONO, self.Z, rt_center=20.3).m_minus_1_coelutes
+        strong = isotope_trace_evidence(reader, self.MONO, self.Z, rt_center=20.3,
+                                        span_from="strongest")
+        assert strong.span_trace == 1 and not strong.found
+        assert strong.coelution[-1] == pytest.approx(1.0)
+        assert strong.m_minus_1_coelutes
+
+    def test_weak_monoisotope_is_measured_as_weak_not_absent(self):
+        reader = _envelope_reader(self.MONO, self.Z, [0.05, 1.0, 0.6])
+        strong = isotope_trace_evidence(reader, self.MONO, self.Z, rt_center=20.3,
+                                        span_from="strongest")
+        assert strong.span_trace == 1 and strong.found
+        assert strong.peak_intensity[0] < 0.1 * strong.peak_intensity[1]
+
+    def test_unknown_span_from_raises(self):
+        with pytest.raises(ValueError, match="span_from"):
+            isotope_trace_evidence(_envelope_reader(self.MONO, self.Z, [1.0, 0.5]), self.MONO,
+                                   self.Z, rt_center=20.3, span_from="loudest")
