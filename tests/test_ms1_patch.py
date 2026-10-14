@@ -293,3 +293,11 @@ def test_find_pwiz_dir_copies_the_dlls_locally(tmp_path, monkeypatch):
     assert tr.find_pwiz_dir(required=False) is None
     with pytest.raises(FileNotFoundError):
         tr.find_pwiz_dir()
+
+
+def test_uncut_scan_is_not_held_to_the_smoothness_check():
+    rng = np.random.default_rng(3)
+    rmz = np.sort(rng.uniform(400, 1800, 40)); rit = rng.uniform(1e3, 1e6, 40).astype(np.float32).astype(float)
+    cmz = rmz * (1 + rng.uniform(-8, 8, 40) / 1e6)      # rough shift, but every peak kept
+    mz, it, info = sc.merge_calibrated_ms1(cmz.astype(np.float32), rit.astype(np.float32), rmz, rit)
+    assert info["n_added"] == 0 and len(mz) == 40
