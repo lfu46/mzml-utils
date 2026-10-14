@@ -57,6 +57,7 @@ class MatchedIon:
     exp_mz: float = 0.0
     exp_intensity: float = 0.0
     mass_error_ppm: float = 0.0
+    origin: str = ""        # set by match_context.canonical_match: deisotoped / raw / raw_fallback
 
 
 @dataclass

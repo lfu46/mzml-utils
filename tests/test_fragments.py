@@ -187,3 +187,19 @@ def test_y0_minus_water_is_below_y0():
         ions = FragmentCalculator('SAAAAAK', mods, precursor_charge=3).calculate_Y_ions(charges=[z])
         by = {i.annotation.split()[0]: i.mz for i in ions if i.annotation and i.annotation.startswith('Y0')}
         assert abs((by['Y0'] - by['Y0-H2O']) - 18.0106 / z) < 1e-6, by
+
+
+def test_canonical_match_records_origin():
+    import numpy as np
+    from mzml_utils import FragmentCalculator, canonical_match, from_spectrum
+    from mzml_utils.reader import Spectrum
+    calc = FragmentCalculator("PEPTIDEK", [], 2)
+    ions = calc.calculate_by_ions() if hasattr(calc, "calculate_by_ions") else calc.calculate_b_ions() + calc.calculate_y_ions()
+    peaks = sorted({round(i.mz, 5) for i in ions if i.charge == 1})[:4]
+    sp = Spectrum(scan_num=1, mz=np.array(peaks), intensity=np.full(len(peaks), 1e4), ms_level=2,
+                  rt=1.0, precursor_mz=500.0, precursor_charge=2)
+    raw = canonical_match(ions, from_spectrum(sp, tolerance_ppm=10, deisotope_spectrum=False, max_charge=2))
+    assert raw and {m.origin for m in raw} == {"raw"}
+    deiso = canonical_match(ions, from_spectrum(sp, tolerance_ppm=10, deisotope_spectrum=True, max_charge=2),
+                            raw_fallback=True)
+    assert deiso and {m.origin for m in deiso} <= {"deisotoped", "raw_fallback"}

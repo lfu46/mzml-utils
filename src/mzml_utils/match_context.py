@@ -90,6 +90,15 @@ def from_arrays(
     )
 
 
+def _tag_origin(matches, origin: str) -> None:
+    """Record which spectrum a match came from (caller subclasses without the field are skipped)."""
+    for m in matches:
+        try:
+            m.origin = origin
+        except AttributeError:
+            pass
+
+
 def canonical_match(
     ions: List[TheoreticalIon],
     ctx: MatchContext,
@@ -113,6 +122,9 @@ def canonical_match(
       3. If ``exclude_mzs`` is provided, any match whose observed m/z is
          within ``exclude_tol_ppm`` of an exclusion target is dropped.
 
+    Each match's ``origin`` says where it was found: ``deisotoped`` (step 1 on a deisotoped
+    spectrum), ``raw`` (step 1 without deisotoping) or ``raw_fallback`` (step 2).
+
     ``match_fn`` lets callers plug in a project-local ``match_peaks``
     implementation (e.g., the annotator's extended ``MatchedIon`` subclass
     with ``has_modification``). The function must accept the same signature
@@ -131,6 +143,7 @@ def canonical_match(
         tolerance_ppm=ctx.tolerance_ppm,
         match_isotopes=not ctx.deisotope_applied,
     )
+    _tag_origin(primary, "deisotoped" if ctx.deisotope_applied else "raw")
 
     if raw_fallback and ctx.deisotope_applied:
         matched_keys = {(m.ion_type, m.ion_number, m.charge) for m in primary}
@@ -144,6 +157,7 @@ def canonical_match(
                 tolerance_ppm=ctx.tolerance_ppm,
                 match_isotopes=False,
             )
+            _tag_origin(raw_hits, "raw_fallback")
             primary.extend(raw_hits)
 
     if exclude_mzs:
