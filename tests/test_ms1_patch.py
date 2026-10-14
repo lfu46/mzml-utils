@@ -301,3 +301,14 @@ def test_uncut_scan_is_not_held_to_the_smoothness_check():
     cmz = rmz * (1 + rng.uniform(-8, 8, 40) / 1e6)      # rough shift, but every peak kept
     mz, it, info = sc.merge_calibrated_ms1(cmz.astype(np.float32), rit.astype(np.float32), rmz, rit)
     assert info["n_added"] == 0 and len(mz) == 40
+
+
+def test_a_natural_peak_count_maximum_is_not_a_cap(tmp_path):
+    db = os.path.join(str(tmp_path), "x.db")
+    conn = sc.open_db(db)
+    for k in range(10):
+        n = 100 + 7 * k                                   # distinct counts: the max is one scan
+        sc.insert_scan(conn, _spec(k + 1, 1, np.linspace(400, 1800, n), np.full(n, 1e5), float(k)))
+    conn.commit(); conn.close()
+    with sc.SpectrumCache(db, mirror_local=False) as c:
+        assert sc.ms1_cap_status(c)["capped"] is False

@@ -1023,8 +1023,8 @@ def ms1_cap_status(reader) -> dict:
     """Whether a reader's MS1 peaks look capped (a per-scan most-intense limit) or were patched.
 
     For a SpectrumCache: patched when its meta records ``ms1_patch``; otherwise capped when at
-    least 5% of MS1 scans share exactly the maximum peak count (a natural peak-count distribution
-    has no such pile-up). For an MzMLReader: read from the mzML header's dataProcessing
+    least 5% of MS1 scans, and at least 3, share exactly the maximum peak count (a natural
+    peak-count distribution has no such pile-up: its maximum is one scan). For an MzMLReader: read from the mzML header's dataProcessing
     ("most intense count"). Returns {capped, cap, patched, frac_at_cap, source}.
     """
     if isinstance(reader, SpectrumCache):
@@ -1041,7 +1041,7 @@ def ms1_cap_status(reader) -> dict:
         if not tot or not top:
             return dict(capped=False, cap=None, patched=False, frac_at_cap=0.0, source="peak-counts")
         frac = top[1] / tot
-        capped = frac >= 0.05 and top[0] >= 50
+        capped = top[1] >= max(3, 0.05 * tot) and top[0] >= 50
         return dict(capped=capped, cap=int(top[0]) if capped else None, patched=False,
                     frac_at_cap=round(frac, 4), source="peak-counts")
     path = getattr(reader, "path", None) or getattr(reader, "filepath", None) or getattr(reader, "filename", None)
