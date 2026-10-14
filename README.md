@@ -34,6 +34,9 @@ pip install -e ".[dev]"
 | `fragments` | Fragment ion calculator (b/y/c/z/Y/oxonium), peak matching, false match rate |
 | `constants` | Physical constants, amino acid masses, common ion lists |
 | `utils` | Spectrum ID parsing, file finding, modification string parsing |
+| `spectrum_cache` | Build-once local cache of an mzML; `open_spectra()`; `patch_ms1()` replaces capped MS1 with the RAW's full centroid list |
+| `ms1quant` | Precursor MS1 intensity, IonQuant-like (top-3 isotope-cluster scans), with a cap-censoring flag |
+| `thermo_raw` | Thermo RAW MS1 centroids through RawFileReader under Mono (DLLs found, not shipped) |
 
 ## Quick Start
 
@@ -120,6 +123,27 @@ code (boundaries, S/N, prominence, Kumler beta shape) and are pinned against tho
 functions. `apex_rt=` measures the peak whose boundaries contain the MS2 time, and
 `nearest_valley=True` stops R's left boundary from running to the start of a zero-filled
 trace. These are measurements, not verdicts: no threshold is applied.
+
+### Undo a per-scan peak cap and quantify precursors from MS1
+
+A conversion preset that keeps only the N most intense peaks per scan truncates busy MS1 surveys.
+If the Thermo RAW is at hand, patch the spectrum cache with every MS1 centroid from it (needs
+`mono`, `mcs` and Thermo's RawFileReader DLLs; set `THERMO_PWIZ_DIR` if they are not found):
+
+```bash
+python -m mzml_utils.spectrum_cache patch-ms1 --dry-run run.mzML     # check only
+python -m mzml_utils.spectrum_cache patch-ms1 run.mzML               # RAW beside the mzML
+python -m mzml_utils.spectrum_cache ms1-status run.mzML
+```
+
+```python
+from mzml_utils import open_spectra, Ms1QuantParams, quantify_precursors
+
+params = Ms1QuantParams.from_workflow("fragpipe.workflow")           # ionquant.* settings
+rows = [{"ms2_scan": 12345, "charge": 3}]                            # anchor: the selected ion
+uncapped = quantify_precursors(open_spectra("run.mzML"), rows, params)
+capped = quantify_precursors(open_spectra("run.mzML", ms1_cap=1000), rows, params)  # as searched
+```
 
 ### Calculate fragment ions
 

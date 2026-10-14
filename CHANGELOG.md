@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Uncapped MS1 from the RAW file.** `spectrum_cache.patch_ms1()` / `python -m
+  mzml_utils.spectrum_cache patch-ms1` replaces every MS1 scan's peaks in a spectrum cache with the
+  full centroid list read from the Thermo RAW (`mzml_utils.thermo_raw`, RawFileReader under Mono;
+  the DLLs are found, not shipped). It undoes a per-scan "N most intense" cap from the conversion
+  preset and refuses anything else: same MS1 scans and RTs, every cached peak a RAW peak, the
+  cached ones the RAW's most intense, re-capping the patched scan reproduces the cache bit for bit,
+  and MS2 rows byte-identical (digest before and after). `mz_mode="calibrated"` handles caches
+  built from MSFragger's `*_calibrated.mzML`: kept peaks stay, the removed ones get the scan's own
+  calibration curve (held-out error p99 under 0.2 ppm). Provenance goes into the cache meta
+  (`ms1_patch`: RAW path, size, sha256, cap undone, peaks before/after).
+- `open_spectra(db, ms1_cap=N)` / `SpectrumCache(ms1_cap=N)` serve MS1 re-capped with
+  `cap_peaks()` (msconvert's rule, ties at the threshold excluded), so one tool can run on capped
+  and uncapped MS1 side by side. `ms1_cap_status()` / `warn_if_ms1_capped()` tell a tool when its
+  MS1 is capped and unpatched.
+- `mzml_utils.ms1quant`: precursor MS1 intensity, IonQuant-like (sum of the top-3 isotope-cluster
+  scans within rttol; nearest peak per isotope within mztol; minscans, minisotopes), parameters
+  from `fragpipe.workflow`. Ported from NGlycoMM's `ms1_xic_extractor.py` and identical to it on
+  9,215 of 9,215 precursors of its validation fraction. Reports top-3, apex, area, apex RT and,
+  on capped MS1, `apex_floor_ratio` / `cap_censored`.
 - `mzml_utils.chrom_extract`: `extract_chromatograms()` takes a peak table (rows with an m/z
   and RT window plus any annotation columns) and extracts one chromatogram per row and run in
   one pass per run, carrying every row column through; `chromatogram_rows()` flattens the
