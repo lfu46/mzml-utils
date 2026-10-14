@@ -766,9 +766,9 @@ def merge_calibrated_ms1(cached_mz, cached_int, raw_mz, raw_int, max_shift_ppm: 
     RAW scan's most intense. The calibration shift (ppm) is then a function of m/z inside the scan
     and is interpolated from the pairs onto the peaks the cap removed (constant beyond the ends).
     Kept peaks keep their calibrated values exactly; added peaks get RAW intensity and
-    interpolated calibrated m/z. Accuracy is measured on the scan itself: shifts at odd-indexed
-    pairs are predicted from the even-indexed ones, and the 99th percentile must stay under
-    ``max_heldout_ppm``.
+    interpolated calibrated m/z. Accuracy is measured on the scan itself, when peaks are added:
+    shifts at odd-indexed pairs are predicted from the even-indexed ones, and the 99th percentile
+    must stay under ``max_heldout_ppm``. A scan the cap did not cut is returned as cached.
 
     Returns (mz, intensity, info) or raises ValueError with the reason.
     """
@@ -806,6 +806,8 @@ def merge_calibrated_ms1(cached_mz, cached_int, raw_mz, raw_int, max_shift_ppm: 
         raise ValueError("recalibration reorders peaks; not a smooth m/z function")
     shift = (b - a) / a * 1e6
     info["max_abs_shift_ppm"] = float(np.abs(shift).max())
+    if len(pair) == len(rmz):          # nothing was cut, nothing to interpolate
+        return cmz, cit.astype(np.float64), info
     if len(a) >= 10:
         tr_i, te_i = np.arange(0, len(a), 2), np.arange(1, len(a), 2)
         res = np.abs(np.interp(a[te_i], a[tr_i], shift[tr_i]) - shift[te_i])
@@ -813,8 +815,6 @@ def merge_calibrated_ms1(cached_mz, cached_int, raw_mz, raw_int, max_shift_ppm: 
         info["heldout_max_ppm"] = float(res.max())
         if info["heldout_p99_ppm"] > max_heldout_ppm:
             raise ValueError(f"calibration shift is not smooth in m/z (held-out p99 {info['heldout_p99_ppm']:.3f} ppm)")
-    if len(pair) == len(rmz):
-        return cmz, cit.astype(np.float64), info
     add = np.setdiff1d(np.arange(len(rmz)), pair)
     add_mz = rmz[add] * (1 + np.interp(rmz[add], a, shift) / 1e6)
     mz = np.concatenate([cmz, add_mz])
@@ -1023,8 +1023,8 @@ def ms1_cap_status(reader) -> dict:
     """Whether a reader's MS1 peaks look capped (a per-scan most-intense limit) or were patched.
 
     For a SpectrumCache: patched when its meta records ``ms1_patch``; otherwise capped when at
-    least 5% of MS1 scans share exactly the maximum peak count (a natural peak-count distribution
-    has no such pile-up). For an MzMLReader: read from the mzML header's dataProcessing
+    least 5% of MS1 scans, and at least 3, share exactly the maximum peak count (a natural
+    peak-count distribution has no such pile-up: its maximum is one scan). For an MzMLReader: read from the mzML header's dataProcessing
     ("most intense count"). Returns {capped, cap, patched, frac_at_cap, source}.
     """
     if isinstance(reader, SpectrumCache):
@@ -1041,7 +1041,7 @@ def ms1_cap_status(reader) -> dict:
         if not tot or not top:
             return dict(capped=False, cap=None, patched=False, frac_at_cap=0.0, source="peak-counts")
         frac = top[1] / tot
-        capped = frac >= 0.05 and top[0] >= 50
+        capped = top[1] >= max(3, 0.05 * tot) and top[0] >= 50
         return dict(capped=capped, cap=int(top[0]) if capped else None, patched=False,
                     frac_at_cap=round(frac, 4), source="peak-counts")
     path = getattr(reader, "path", None) or getattr(reader, "filepath", None) or getattr(reader, "filename", None)

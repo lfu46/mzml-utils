@@ -14,6 +14,8 @@ match_isotopes=not ctx.deisotope_applied)``.
 """
 from __future__ import annotations
 
+import functools
+
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -90,6 +92,15 @@ def from_arrays(
     )
 
 
+def _tag_origin(matches, origin: str) -> None:
+    """Record which spectrum a match came from (caller subclasses without the field are skipped)."""
+    for m in matches:
+        try:
+            m.origin = origin
+        except AttributeError:
+            pass
+
+
 def canonical_match(
     ions: List[TheoreticalIon],
     ctx: MatchContext,
@@ -98,6 +109,7 @@ def canonical_match(
     exclude_mzs: Optional[List[float]] = None,
     exclude_tol_ppm: float = 15.0,
     match_fn: Optional[Callable] = None,
+    exclusive: bool = True,
 ) -> List[MatchedIon]:
     """Canonical theoretical→experimental match.
 
@@ -113,6 +125,12 @@ def canonical_match(
       3. If ``exclude_mzs`` is provided, any match whose observed m/z is
          within ``exclude_tol_ppm`` of an exclusion target is dropped.
 
+    ``exclusive=False`` (default matcher only) lets one peak be reported for every identity it
+    fits, instead of the first in priority order.
+
+    Each match's ``origin`` says where it was found: ``deisotoped`` (step 1 on a deisotoped
+    spectrum), ``raw`` (step 1 without deisotoping) or ``raw_fallback`` (step 2).
+
     ``match_fn`` lets callers plug in a project-local ``match_peaks``
     implementation (e.g., the annotator's extended ``MatchedIon`` subclass
     with ``has_modification``). The function must accept the same signature
@@ -125,12 +143,17 @@ def canonical_match(
         return []
 
     mp = match_fn or _default_match_peaks
+    if not exclusive:
+        if match_fn is not None:
+            raise ValueError("exclusive=False needs the default matcher")
+        mp = functools.partial(_default_match_peaks, exclusive=False)
 
     primary = mp(
         ions, ctx.exp_mz, ctx.exp_intensity,
         tolerance_ppm=ctx.tolerance_ppm,
         match_isotopes=not ctx.deisotope_applied,
     )
+    _tag_origin(primary, "deisotoped" if ctx.deisotope_applied else "raw")
 
     if raw_fallback and ctx.deisotope_applied:
         matched_keys = {(m.ion_type, m.ion_number, m.charge) for m in primary}
@@ -144,6 +167,7 @@ def canonical_match(
                 tolerance_ppm=ctx.tolerance_ppm,
                 match_isotopes=False,
             )
+            _tag_origin(raw_hits, "raw_fallback")
             primary.extend(raw_hits)
 
     if exclude_mzs:

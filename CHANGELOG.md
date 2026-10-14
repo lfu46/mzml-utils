@@ -20,6 +20,10 @@ All notable changes to this project are documented here. The format follows
   `cap_peaks()` (msconvert's rule, ties at the threshold excluded), so one tool can run on capped
   and uncapped MS1 side by side. `ms1_cap_status()` / `warn_if_ms1_capped()` tell a tool when its
   MS1 is capped and unpatched.
+- Match provenance: `MatchedIon.origin` (`deisotoped` / `raw` / `raw_fallback`, set by
+  `canonical_match`) and `match_peaks(exclusive=False)` / `canonical_match(exclusive=False)`,
+  which report a peak once per identity it fits instead of giving it to the first in priority
+  order. Defaults are unchanged.
 - `mzml_utils.ms1quant`: precursor MS1 intensity, IonQuant-like (sum of the top-3 isotope-cluster
   scans within rttol; nearest peak per isotope within mztol; minscans, minisotopes), parameters
   from `fragpipe.workflow`. Ported from NGlycoMM's `ms1_xic_extractor.py` and identical to it on
