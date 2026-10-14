@@ -20,6 +20,9 @@ All notable changes to this project are documented here. The format follows
   `cap_peaks()` (msconvert's rule, ties at the threshold excluded), so one tool can run on capped
   and uncapped MS1 side by side. `ms1_cap_status()` / `warn_if_ms1_capped()` tell a tool when its
   MS1 is capped and unpatched.
+- `recorded_precursor_ms1(scan)` on `MzMLReader` and `SpectrumCache`: the MS1 scan the
+  precursor element records (`spectrumRef`), checked to exist and be MS1, else the nearest
+  earlier MS1 with the reason. `find_best_ms1` (strongest of the neighbours) is unchanged.
 - Match provenance: `MatchedIon.origin` (`deisotoped` / `raw` / `raw_fallback`, set by
   `canonical_match`) and `match_peaks(exclusive=False)` / `canonical_match(exclusive=False)`,
   which report a peak once per identity it fits instead of giving it to the first in priority

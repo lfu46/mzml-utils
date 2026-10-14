@@ -83,6 +83,16 @@ def _parse_scan_num(spec: dict) -> int:
     return 0
 
 
+def _scan_num_from_ref(ref: Optional[str]) -> Optional[int]:
+    """Scan number from a nativeID such as 'controllerType=0 controllerNumber=1 scan=1234'."""
+    if ref and "scan=" in ref:
+        try:
+            return int(ref.split("scan=")[-1].split()[0])
+        except ValueError:
+            return None
+    return None
+
+
 def _extract_spectrum(spec: dict) -> Spectrum:
     """Convert a pyteomics spectrum dict to a Spectrum object."""
     scan_num = _parse_scan_num(spec)
@@ -265,6 +275,38 @@ class MzMLReader:
         if best_scan is None and ms1_scans:
             best_scan = ms1_scans[0]
         return best_scan
+
+    def recorded_precursor_ms1(self, scan_num: int, max_lookback: int = 500) -> Tuple[Optional[int], str]:
+        """(MS1 scan, source) for an MSn scan: the scan its precursor element records.
+
+        The recorded scan (``spectrumRef``) is used when it exists and is MS1; source
+        ``'recorded'``. Otherwise the nearest earlier MS1 is returned with source
+        ``'nearest_preceding:<reason>'`` (reason: ``no_recorded_ref``, ``recorded_ref_missing``,
+        ``recorded_ref_not_ms1``), or ``(None, reason)``. Unlike ``find_best_ms1`` this does not
+        look for the strongest precursor among neighbours: it is the scan the instrument chose.
+        Same method on ``SpectrumCache``.
+        """
+        scan_id = f'controllerType=0 controllerNumber=1 scan={scan_num}'
+        try:
+            spec = self._reader.get_by_id(scan_id)
+        except (KeyError, IndexError):
+            return None, "scan_missing"
+        precs = (spec.get("precursorList") or {}).get("precursor") or []
+        ref = _scan_num_from_ref(precs[0].get("spectrumRef")) if precs else None
+        if ref is None:
+            reason = "no_recorded_ref"
+        else:
+            rs = self.get_spectrum(ref)
+            if rs is not None and rs.ms_level == 1:
+                return ref, "recorded"
+            reason = "recorded_ref_missing" if rs is None else "recorded_ref_not_ms1"
+        s = scan_num - 1
+        while s > 0 and scan_num - s <= max_lookback:
+            sp = self.get_spectrum(s)
+            if sp is not None and sp.ms_level == 1:
+                return s, f"nearest_preceding:{reason}"
+            s -= 1
+        return None, reason
 
     def extract_metadata(self, scan_num: int) -> Optional[Dict]:
         """
