@@ -43,7 +43,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 import numpy as np
 
 # Reuse mzml_utils' own extraction + data model (never reimplement, never modify it).
-from .reader import Spectrum, classify_activation, _extract_spectrum
+from .reader import Spectrum, classify_activation, _extract_spectrum, _scan_num_from_ref
 
 SCHEMA_VERSION = 1
 _HCD_RE = re.compile(r"@hcd([\d.]+)")
@@ -116,13 +116,6 @@ def decode_peaks(mz_blob, int_blob) -> Tuple[np.ndarray, np.ndarray]:
     return mz, it
 
 
-def _scan_num_from_ref(ref: Optional[str]) -> Optional[int]:
-    if ref and "scan=" in ref:
-        try:
-            return int(ref.split("scan=")[-1].split()[0])
-        except ValueError:
-            return None
-    return None
 
 
 def _jsonable(obj, _depth=0):
@@ -616,6 +609,25 @@ class SpectrumCache:
             "SELECT scan_num FROM scans WHERE ms_level=1 AND scan_num<? ORDER BY scan_num DESC LIMIT 1",
             (scan_num,)).fetchone()
         return r["scan_num"] if r else None
+
+    def recorded_precursor_ms1(self, scan_num: int, max_lookback: int = 500) -> Tuple[Optional[int], str]:
+        """(MS1 scan, source): the MS1 scan the precursor element records, checked to exist and to
+        be MS1 (source 'recorded'), else the nearest earlier MS1 with source
+        'nearest_preceding:<reason>'. Same contract as MzMLReader.recorded_precursor_ms1."""
+        r = self._conn.execute("SELECT precursor_spectrum_ref FROM scans WHERE scan_num=?", (scan_num,)).fetchone()
+        if r is None:
+            return None, "scan_missing"
+        ref = r["precursor_spectrum_ref"]
+        if not ref:
+            reason = "no_recorded_ref"
+        else:
+            rr = self._conn.execute("SELECT ms_level FROM scans WHERE scan_num=?", (ref,)).fetchone()
+            if rr is not None and rr["ms_level"] == 1:
+                return int(ref), "recorded"
+            reason = "recorded_ref_missing" if rr is None else "recorded_ref_not_ms1"
+        r = self._conn.execute("SELECT scan_num FROM scans WHERE ms_level=1 AND scan_num<? AND scan_num>=? "
+                               "ORDER BY scan_num DESC LIMIT 1", (scan_num, scan_num - max_lookback)).fetchone()
+        return (int(r["scan_num"]), f"nearest_preceding:{reason}") if r else (None, reason)
 
     def meta(self) -> dict:
         return {r["key"]: json.loads(r["value"]) for r in self._conn.execute("SELECT key, value FROM meta")}
