@@ -17,6 +17,9 @@ Modules:
     utils      - Spectrum ID parsing, file finding, modification parsing
     structure  - Protein structure databases (AlphaFold, PDBe, UniProt,
                  InterPro) behind one resolver
+    ms1quant   - Precursor MS1 intensity (IonQuant-like top-3), cap-censoring flag
+    thermo_raw - Thermo RAW MS1 centroids via RawFileReader under Mono, for
+                 spectrum_cache.patch_ms1 (undoing a per-scan peak cap)
 
 ``structure`` is imported lazily: it pulls in ``requests``, and the spectrum
 side of this package has no use for HTTP. ``mzml_utils.structure`` and
@@ -38,7 +41,16 @@ from .spectrum_cache import (
     cache_path_for,
     build_cache,
     verify_cache,
+    patch_ms1,
+    ms1_cap_status,
+    warn_if_ms1_capped,
+    cap_peaks,
 )
+
+# ms1quant -- IonQuant-like precursor MS1 intensity (top-3 isotope-cluster scans), with a flag
+# for results the per-scan peak cap may have censored. thermo_raw (Thermo RAW via Mono) is
+# imported on use by spectrum_cache.patch_ms1.
+from .ms1quant import Ms1QuantParams, Ms1Quant, Ms1Index, precursor_ms1, quantify_precursors
 
 # ions
 from .ions import (
@@ -163,6 +175,8 @@ from .proteases import (
 from .utils import parse_spectrum_id, find_mzml_file, parse_modifications
 
 __all__ = [
+    "patch_ms1", "ms1_cap_status", "warn_if_ms1_capped", "cap_peaks",
+    "Ms1QuantParams", "Ms1Quant", "Ms1Index", "precursor_ms1", "quantify_precursors",
     # version
     "__version__",
     # reader

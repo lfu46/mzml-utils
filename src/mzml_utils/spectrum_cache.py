@@ -482,7 +482,11 @@ class SpectrumCache:
     """
 
     def __init__(self, db_path: str, mirror_local: bool = True, in_memory: bool = False,
-                 local_dir: Optional[str] = None):
+                 local_dir: Optional[str] = None, ms1_cap: Optional[int] = None):
+        """``ms1_cap``: serve MS1 scans re-capped to their N most intense peaks (``cap_peaks``).
+        On a cache patched from the RAW this reproduces the capped mzML exactly, so the same
+        tool can be run on capped and uncapped MS1 side by side."""
+        self.ms1_cap = ms1_cap
         self.source_path = db_path
         path = db_path
         if mirror_local and self._is_network(db_path):
@@ -513,9 +517,14 @@ class SpectrumCache:
         return dst
 
     # -- MzMLReader-compatible API ---------------------------------------- #
+    def _view(self, sp: Spectrum) -> Spectrum:
+        if self.ms1_cap and sp.ms_level == 1 and len(sp.mz) > self.ms1_cap:
+            sp.mz, sp.intensity = cap_peaks(sp.mz, sp.intensity, self.ms1_cap)
+        return sp
+
     def get_spectrum(self, scan_num: int) -> Optional[Spectrum]:
         row = self._conn.execute("SELECT * FROM scans WHERE scan_num=?", (scan_num,)).fetchone()
-        return _spectrum_from_row(row) if row else None
+        return self._view(_spectrum_from_row(row)) if row else None
 
     def iter_spectra(self, ms_level: Optional[int] = None,
                      rt_range: Optional[Tuple[float, float]] = None) -> Iterator[Spectrum]:
@@ -537,7 +546,7 @@ class SpectrumCache:
         if where:
             sql += " WHERE " + " AND ".join(where)
         for row in self._conn.execute(sql + " ORDER BY scan_num", params):
-            yield _spectrum_from_row(row)
+            yield self._view(_spectrum_from_row(row))
 
     def find_best_ms1(self, ms2_scan: int, precursor_mz: float,
                       n_ms1: int = 3, tol_da: float = 0.02) -> Optional[int]:
@@ -657,7 +666,9 @@ def open_spectra(path: str, prefer_cache: bool = True, in_memory=None,
     """Drop-in for MzMLReader(path). Given a .db/.sqlite/.cache path, opens the cache.
     Given an mzML path and prefer_cache=True, auto-uses the co-located cache
     (<mzml_dir>/spectra_cache/<stem>.spectra.db) when it exists, else MzMLReader.
-    Network caches load into RAM by default so nothing is left on local disk."""
+    Network caches load into RAM by default so nothing is left on local disk.
+    ``ms1_cap=N`` (caches only) serves MS1 re-capped to its N most intense peaks (``cap_peaks``),
+    which on a cache patched from the RAW reproduces the capped mzML exactly."""
     p = str(path)
     if p.lower().endswith((".db", ".sqlite", ".cache")):
         return _open_cache(p, in_memory, mirror_local, **kw)
@@ -667,6 +678,393 @@ def open_spectra(path: str, prefer_cache: bool = True, in_memory=None,
             return _open_cache(cp, in_memory, mirror_local, **kw)
     from .reader import MzMLReader
     return MzMLReader(p)
+
+
+# --------------------------------------------------------------------------- #
+# MS1 from the RAW file: undo a per-scan peak cap (e.g. msconvert "1000 most intense")
+# --------------------------------------------------------------------------- #
+class PatchError(RuntimeError):
+    """The RAW export does not match the cache; nothing was written."""
+
+
+def _ms2_digest(conn: sqlite3.Connection) -> str:
+    """sha256 over every non-MS1 row's scan number and peak blobs, in scan order."""
+    import hashlib
+    h = hashlib.sha256()
+    for r in conn.execute("SELECT scan_num, mz_blob, int_blob FROM scans WHERE ms_level != 1 ORDER BY scan_num"):
+        h.update(str(r[0]).encode())
+        h.update(r[1] or b"")
+        h.update(r[2] or b"")
+    return h.hexdigest()
+
+
+def cap_peaks(mz, intensity, n: int):
+    """The ``n`` most intense peaks, excluding ties at the threshold (msconvert's rule), in m/z order.
+
+    msconvert's "threshold count N most-intense" keeps the N most intense peaks and drops every
+    peak tied at the threshold when keeping them all would exceed N, so a scan can end with N - 1.
+    Applying this to a patched scan returns the capped scan exactly; ``patch_ms1`` checks that.
+    """
+    mz = np.asarray(mz)
+    it = np.asarray(intensity)
+    if n is None or len(it) <= n:
+        return mz, it
+    desc = np.sort(it)[::-1]
+    thr = desc[n - 1]
+    keep = it > thr if desc[n] == thr else it >= thr
+    return mz[keep], it[keep]
+
+
+def check_ms1_against_raw(cached_mz, cached_int, raw_mz, raw_int, mz_ppm: float = 0.5) -> Optional[str]:
+    """None when the cached peaks are the RAW peaks after a most-intense cap; else the reason.
+
+    The cached peaks must each match a distinct RAW peak (m/z within ``mz_ppm``, intensity equal
+    at float32), and when the RAW scan has more peaks, the cached ones must be its most intense:
+    no RAW peak left out may be more intense than the weakest one kept.
+    """
+    cmz = np.asarray(cached_mz, dtype=np.float64)
+    cit = np.asarray(cached_int, dtype=np.float32)
+    rmz = np.asarray(raw_mz, dtype=np.float64)
+    rit = np.asarray(raw_int, dtype=np.float64)
+    if len(cmz) == 0:
+        return None if len(rmz) == 0 else f"cache scan is empty, the RAW scan has {len(rmz)} peaks"
+    if len(rmz) == 0:
+        return f"{len(cmz)} cached peaks, none in the RAW scan"
+    if len(cmz) > len(rmz):
+        return f"cache has more peaks ({len(cmz)}) than the RAW scan ({len(rmz)})"
+    idx = np.clip(np.searchsorted(rmz, cmz), 1, len(rmz) - 1) if len(rmz) > 1 else np.zeros(len(cmz), int)
+    if len(rmz) > 1:
+        left, right = rmz[idx - 1], rmz[idx]
+        j = np.where(np.abs(cmz - left) <= np.abs(cmz - right), idx - 1, idx)
+    else:
+        j = idx
+    ppm = np.abs(rmz[j] - cmz) / cmz * 1e6
+    if (ppm > mz_ppm).any():
+        k = int(np.argmax(ppm))
+        return f"cached peak m/z {cmz[k]:.5f} has no RAW peak within {mz_ppm} ppm (nearest {ppm[k]:.2f} ppm)"
+    if len(np.unique(j)) != len(j):
+        return "two cached peaks map to one RAW peak"
+    rel = np.abs(rit[j].astype(np.float32) - cit) / np.maximum(np.abs(cit), 1.0)
+    if (rel > 1e-6).any():
+        k = int(np.argmax(rel))
+        return f"intensity differs at m/z {cmz[k]:.5f}: cache {cit[k]:.6g}, RAW {rit[j][k]:.6g}"
+    if len(j) < len(rmz):
+        left_out = np.ones(len(rmz), bool)
+        left_out[j] = False
+        if rit[left_out].max() > float(cit.min()) * (1 + 1e-6):
+            return (f"not a most-intense cap: a RAW peak left out ({rit[left_out].max():.6g}) is more "
+                    f"intense than the weakest kept ({float(cit.min()):.6g})")
+    return None
+
+
+def merge_calibrated_ms1(cached_mz, cached_int, raw_mz, raw_int, max_shift_ppm: float = 50.0,
+                         max_heldout_ppm: float = 1.0):
+    """Uncap a scan whose kept peaks were m/z-recalibrated (e.g. MSFragger's *_calibrated.mzML).
+
+    Each kept peak is paired with the RAW peak of identical intensity (float32) nearest in m/z,
+    within ``max_shift_ppm``; every kept peak must pair, uniquely, and the kept peaks must be the
+    RAW scan's most intense. The calibration shift (ppm) is then a function of m/z inside the scan
+    and is interpolated from the pairs onto the peaks the cap removed (constant beyond the ends).
+    Kept peaks keep their calibrated values exactly; added peaks get RAW intensity and
+    interpolated calibrated m/z. Accuracy is measured on the scan itself: shifts at odd-indexed
+    pairs are predicted from the even-indexed ones, and the 99th percentile must stay under
+    ``max_heldout_ppm``.
+
+    Returns (mz, intensity, info) or raises ValueError with the reason.
+    """
+    cmz = np.asarray(cached_mz, dtype=np.float64)
+    cit = np.asarray(cached_int, dtype=np.float32)
+    rmz = np.asarray(raw_mz, dtype=np.float64)
+    rit = np.asarray(raw_int, dtype=np.float64)
+    info = dict(n_kept=len(cmz), n_added=0, max_abs_shift_ppm=0.0, heldout_p99_ppm=0.0, heldout_max_ppm=0.0)
+    if len(cmz) == 0:
+        if len(rmz):
+            raise ValueError(f"cache scan is empty, the RAW scan has {len(rmz)} peaks")
+        return cmz, cit.astype(np.float64), info
+    r32 = rit.astype(np.float32)
+    by_int: Dict[float, List[int]] = {}
+    for k, v in enumerate(r32):
+        by_int.setdefault(float(v), []).append(k)
+    used = set()
+    pair = np.empty(len(cmz), dtype=int)
+    for k, (m, v) in enumerate(zip(cmz, cit)):
+        cand = [q for q in by_int.get(float(v), ()) if q not in used and abs(rmz[q] - m) / m * 1e6 <= max_shift_ppm]
+        if not cand:
+            raise ValueError(f"kept peak m/z {m:.5f} (intensity {v:.6g}) has no RAW peak of that intensity "
+                             f"within {max_shift_ppm} ppm")
+        q = min(cand, key=lambda q: abs(rmz[q] - m))
+        used.add(q)
+        pair[k] = q
+    if len(pair) < len(rmz):
+        left_out = np.ones(len(rmz), bool)
+        left_out[pair] = False
+        if rit[left_out].max() > float(cit.min()) * (1 + 1e-6):
+            raise ValueError("not a most-intense cap: a RAW peak left out is more intense than the weakest kept")
+    o = np.argsort(rmz[pair])
+    a, b = rmz[pair][o], cmz[o]
+    if (np.diff(b) < 0).any():
+        raise ValueError("recalibration reorders peaks; not a smooth m/z function")
+    shift = (b - a) / a * 1e6
+    info["max_abs_shift_ppm"] = float(np.abs(shift).max())
+    if len(a) >= 10:
+        tr_i, te_i = np.arange(0, len(a), 2), np.arange(1, len(a), 2)
+        res = np.abs(np.interp(a[te_i], a[tr_i], shift[tr_i]) - shift[te_i])
+        info["heldout_p99_ppm"] = float(np.percentile(res, 99))
+        info["heldout_max_ppm"] = float(res.max())
+        if info["heldout_p99_ppm"] > max_heldout_ppm:
+            raise ValueError(f"calibration shift is not smooth in m/z (held-out p99 {info['heldout_p99_ppm']:.3f} ppm)")
+    if len(pair) == len(rmz):
+        return cmz, cit.astype(np.float64), info
+    add = np.setdiff1d(np.arange(len(rmz)), pair)
+    add_mz = rmz[add] * (1 + np.interp(rmz[add], a, shift) / 1e6)
+    mz = np.concatenate([cmz, add_mz])
+    it = np.concatenate([cit.astype(np.float64), rit[add]])
+    srt = np.argsort(mz, kind="stable")
+    info["n_added"] = int(len(add))
+    return mz[srt], it[srt], info
+
+
+def _default_raw_for(mzml_or_db: str) -> Optional[str]:
+    """<mzml_dir>/<stem>.raw for an mzML (also stripping _calibrated / _uncalibrated)."""
+    p = os.path.abspath(mzml_or_db)
+    if p.lower().endswith(".db"):
+        d = os.path.dirname(os.path.dirname(p))
+        stem = os.path.basename(p)[: -len(".spectra.db")] if p.endswith(".spectra.db") else os.path.splitext(os.path.basename(p))[0]
+    else:
+        d, stem = os.path.dirname(p), os.path.splitext(os.path.basename(p))[0]
+    for s in (stem, re.sub(r"_(un)?calibrated$", "", stem)):
+        for ext in (".raw", ".RAW"):
+            cand = os.path.join(d, s + ext)
+            if os.path.isfile(cand):
+                return cand
+    return None
+
+
+def patch_ms1(cache: str, raw_path: Optional[str] = None, *, export: Optional[dict] = None,
+              pwiz_dir: Optional[str] = None, dry_run: bool = False, force: bool = False,
+              mz_ppm: float = 0.5, rt_tol_min: float = 1e-4, mz_mode: str = "auto",
+              log=None) -> dict:
+    """Replace every MS1 scan's peaks in a spectrum cache with the full centroid list from the RAW.
+
+    ``cache`` is the .spectra.db or the mzML it sits beside. ``raw_path`` defaults to the RAW next
+    to the mzML. ``export`` ({scan: thermo_raw.RawMs1Scan}) bypasses the RAW read (tests).
+
+    Checked before anything is written; any failure raises PatchError and leaves the cache as it
+    was:
+      * the cache and the RAW hold the same MS1 scan numbers, at the same retention times;
+      * every cached MS1 peak is a RAW peak (m/z within ``mz_ppm``, same intensity), and where the
+        RAW scan has more peaks the cached ones are its most intense, i.e. the only difference is
+        a most-intense cap. A different centroider would fail here, so the patch never mixes two;
+      * every RAW MS1 scan is centroid data (exporter source 1 or 2), not profile.
+    ``mz_mode``: "exact" requires the cached m/z to be the RAW m/z and writes the RAW peaks.
+    "calibrated" is for a cache built from a recalibrated mzML (MSFragger's *_calibrated.mzML):
+    kept peaks stay as they are and the removed ones are added with m/z recalibrated by the
+    scan's own shift curve (``merge_calibrated_ms1``). "auto" picks "calibrated" when the cache's
+    source mzML name ends in _calibrated, else "exact".
+    MS2 and higher rows are not touched: a digest of their peak blobs is compared before and after.
+    TIC and base peak stay as recorded (the mzML takes them from the scan header).
+
+    The cache records ``ms1_patch`` in its meta: RAW path, size and sha256, exporter version, the
+    cap that was undone, peaks before and after, and the MS2 digest. A cache already patched from
+    the same RAW is left alone; from a different RAW it raises unless ``force``.
+    """
+    from . import thermo_raw
+
+    def _log(m):
+        if log:
+            log(m)
+
+    db = cache if cache.lower().endswith((".db", ".sqlite", ".cache")) else cache_path_for(cache)
+    if not os.path.isfile(db):
+        raise FileNotFoundError(f"no spectrum cache at {db}; build it first")
+    if export is None:
+        raw_path = raw_path or _default_raw_for(cache)
+        if not raw_path:
+            raise FileNotFoundError(f"no RAW file found beside {cache}; pass raw_path / --raw")
+    t0 = time.time()
+
+    # Work on a local copy: SQLite writes over SMB are unsafe, and the original stays intact
+    # until the patched copy is complete and checked.
+    work_dir = tempfile.mkdtemp(prefix="ms1patch_", dir=_build_tmpdir())
+    work = os.path.join(work_dir, os.path.basename(db))
+    try:
+        shutil.copy2(db, work)
+        conn = sqlite3.connect(work)
+        conn.row_factory = sqlite3.Row
+        meta = {r["key"]: json.loads(r["value"]) for r in conn.execute("SELECT key, value FROM meta")}
+        if mz_mode == "auto":
+            src = os.path.splitext(os.path.basename(str(meta.get("source_mzml") or db)))[0]
+            src = src[: -len(".spectra")] if src.endswith(".spectra") else src
+            mz_mode = "calibrated" if src.endswith("_calibrated") else "exact"
+        if mz_mode not in ("exact", "calibrated"):
+            raise ValueError(f"mz_mode must be auto, exact or calibrated, not {mz_mode!r}")
+        raw_id = None
+        if raw_path:
+            st = os.stat(raw_path)
+            raw_id = dict(raw_path=os.path.abspath(raw_path), raw_size=st.st_size)
+        prev = meta.get("ms1_patch")
+        if prev:
+            same = raw_id and prev.get("raw_size") == raw_id["raw_size"] and \
+                os.path.basename(prev.get("raw_path", "")) == os.path.basename(raw_id["raw_path"])
+            if same and not force:
+                conn.close()
+                _log(f"already patched from {prev.get('raw_path')}; nothing to do")
+                return dict(prev, status="already_patched", db_path=db)
+            if not force:
+                conn.close()
+                raise PatchError(f"{db} was patched from {prev.get('raw_path')}; pass force=True to redo it")
+
+        if export is None:
+            _log(f"exporting MS1 from {raw_path}")
+            export = thermo_raw.export_ms1(raw_path, pwiz_dir=pwiz_dir)
+        rows = conn.execute("SELECT scan_num, rt, n_peaks, mz_blob, int_blob FROM scans "
+                            "WHERE ms_level = 1 ORDER BY scan_num").fetchall()
+        cache_scans = [r["scan_num"] for r in rows]
+        if set(cache_scans) != set(export):
+            only_c = sorted(set(cache_scans) - set(export))[:5]
+            only_r = sorted(set(export) - set(cache_scans))[:5]
+            raise PatchError(f"MS1 scan numbers differ: cache-only {only_c}, RAW-only {only_r}")
+        profile = [s for s, x in export.items() if x.source not in (1, 2)]
+        if profile:
+            raise PatchError(f"{len(profile)} RAW MS1 scans have no centroids (e.g. scan {profile[0]})")
+
+        before_digest = _ms2_digest(conn)
+        counts: Dict[int, int] = {}
+        for r in rows:
+            counts[r["n_peaks"]] = counts.get(r["n_peaks"], 0) + 1
+        cap_hint = max(counts) if counts else None
+        n_before = n_after = 0
+        truncated, cap_values = 0, {}
+        updates = []
+        heldout = []
+        max_shift = 0.0
+        for r in rows:
+            s = r["scan_num"]
+            x = export[s]
+            if r["rt"] is not None and abs(float(r["rt"]) - x.rt) > rt_tol_min:
+                raise PatchError(f"scan {s}: retention time {r['rt']} in the cache, {x.rt} in the RAW")
+            cmz, cit = decode_peaks(r["mz_blob"], r["int_blob"])
+            if mz_mode == "exact":
+                why = check_ms1_against_raw(cmz, cit, x.mz, x.intensity, mz_ppm=mz_ppm)
+                if why:
+                    raise PatchError(f"scan {s}: {why}" + (
+                        " (if the cache was built from a recalibrated mzML, use mz_mode='calibrated')"
+                        if "no RAW peak" in why else ""))
+                new_mz, new_it = x.mz, x.intensity
+            else:
+                try:
+                    new_mz, new_it, info = merge_calibrated_ms1(cmz, cit, x.mz, x.intensity)
+                except ValueError as e:
+                    raise PatchError(f"scan {s}: {e}")
+                heldout.append(info["heldout_p99_ppm"])
+                max_shift = max(max_shift, info["max_abs_shift_ppm"])
+            if len(new_mz) > len(cmz):
+                # Re-capping the patched scan must give back the cached scan, bit for bit at float32.
+                rmz_c, rit_c = cap_peaks(np.asarray(new_mz, np.float32), np.asarray(new_it, np.float32), cap_hint)
+                if len(rmz_c) != len(cmz) or not (np.array_equal(rmz_c, cmz.astype(np.float32))
+                                                  and np.array_equal(rit_c, cit.astype(np.float32))):
+                    raise PatchError(f"scan {s}: re-capping the patched scan at {cap_hint} does not "
+                                     f"reproduce the cached scan ({len(rmz_c)} vs {len(cmz)} peaks)")
+            n_before += len(cmz)
+            n_after += len(new_mz)
+            if len(x.mz) > len(cmz):
+                truncated += 1
+                cap_values[len(cmz)] = cap_values.get(len(cmz), 0) + 1
+            mzb, itb = encode_peaks(new_mz, new_it)
+            updates.append((mzb, itb, int(len(new_mz)), s))
+        cap = max(cap_values, key=cap_values.get) if cap_values else None
+        report = dict(
+            db_path=db, raw_path=os.path.abspath(raw_path) if raw_path else None,
+            raw_size=raw_id["raw_size"] if raw_id else None,
+            exporter_version=thermo_raw.EXPORTER_VERSION, n_ms1=len(rows),
+            ms1_truncated_before=truncated, cap_undone=cap, recap_reproduces_cache=True,
+            truncated_peak_counts={str(k): v for k, v in sorted(cap_values.items())},
+            ms1_peaks_before=n_before, ms1_peaks_after=n_after, ms2_digest=before_digest,
+            mz_ppm=mz_ppm, rt_tol_min=rt_tol_min, mz_mode=mz_mode,
+        )
+        if mz_mode == "calibrated":
+            report["max_abs_calibration_shift_ppm"] = round(max_shift, 3)
+            report["heldout_p99_ppm_worst_scan"] = round(max(heldout), 4) if heldout else 0.0
+            report["heldout_p99_ppm_median_scan"] = round(float(np.median(heldout)), 4) if heldout else 0.0
+        if dry_run:
+            conn.close()
+            report["status"] = "checked (dry run, nothing written)"
+            return report
+
+        if raw_path:
+            _log("hashing the RAW file")
+            report["raw_sha256"] = thermo_raw.sha256_file(raw_path)
+        conn.executemany("UPDATE scans SET mz_blob = ?, int_blob = ?, n_peaks = ? WHERE scan_num = ?", updates)
+        if _ms2_digest(conn) != before_digest:
+            raise PatchError("MS2 rows changed during the patch")
+        report["patched_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        report["seconds"] = round(time.time() - t0, 1)
+        set_meta(conn, ms1_patch={k: v for k, v in report.items() if k != "db_path"})
+        conn.commit()
+        conn.execute("VACUUM")
+        conn.close()
+        # Publish: copy beside the original, then an atomic rename over it.
+        staged = db + ".ms1patch.tmp"
+        shutil.copy2(work, staged)
+        if os.path.getsize(staged) != os.path.getsize(work):
+            os.remove(staged)
+            raise PatchError("staged copy size mismatch; original left in place")
+        os.replace(staged, db)
+        report["status"] = "patched"
+        report["db_bytes"] = os.path.getsize(db)
+        _log(f"patched {len(rows)} MS1 scans ({truncated} were truncated at {cap}); "
+             f"{n_before} -> {n_after} peaks")
+        return report
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def ms1_cap_status(reader) -> dict:
+    """Whether a reader's MS1 peaks look capped (a per-scan most-intense limit) or were patched.
+
+    For a SpectrumCache: patched when its meta records ``ms1_patch``; otherwise capped when at
+    least 5% of MS1 scans share exactly the maximum peak count (a natural peak-count distribution
+    has no such pile-up). For an MzMLReader: read from the mzML header's dataProcessing
+    ("most intense count"). Returns {capped, cap, patched, frac_at_cap, source}.
+    """
+    if isinstance(reader, SpectrumCache):
+        m = reader.meta()
+        if reader.ms1_cap:
+            return dict(capped=True, cap=reader.ms1_cap, patched=bool(m.get("ms1_patch")),
+                        frac_at_cap=float("nan"), source="re-capped view")
+        if m.get("ms1_patch"):
+            return dict(capped=False, cap=m["ms1_patch"].get("cap_undone"), patched=True,
+                        frac_at_cap=0.0, source="cache-meta")
+        tot = reader._conn.execute("SELECT COUNT(*) FROM scans WHERE ms_level = 1").fetchone()[0]
+        top = reader._conn.execute("SELECT n_peaks, COUNT(*) FROM scans WHERE ms_level = 1 "
+                                   "GROUP BY n_peaks ORDER BY n_peaks DESC LIMIT 1").fetchone()
+        if not tot or not top:
+            return dict(capped=False, cap=None, patched=False, frac_at_cap=0.0, source="peak-counts")
+        frac = top[1] / tot
+        capped = frac >= 0.05 and top[0] >= 50
+        return dict(capped=capped, cap=int(top[0]) if capped else None, patched=False,
+                    frac_at_cap=round(frac, 4), source="peak-counts")
+    path = getattr(reader, "path", None) or getattr(reader, "filepath", None) or getattr(reader, "filename", None)
+    cap = None
+    if path and os.path.isfile(str(path)):
+        with open(str(path), "rb") as fh:
+            head = fh.read(200_000).decode("utf-8", "replace")
+        m = re.search(r'most intense count[^"]*"\s+value="(\d+)"', head)
+        if m:
+            cap = int(m.group(1))
+    return dict(capped=cap is not None, cap=cap, patched=False, frac_at_cap=float("nan"),
+                source="mzml-header" if path else "unknown")
+
+
+def warn_if_ms1_capped(reader, what: str = "MS1 peaks") -> dict:
+    """Warn once per call site when MS1 is capped and not patched; returns ms1_cap_status."""
+    import warnings
+    st = ms1_cap_status(reader)
+    if st["capped"]:
+        warnings.warn(f"{what}: MS1 scans are capped at {st['cap']} peaks and the cache is not "
+                      f"patched from the RAW (spectrum_cache patch-ms1); absent MS1 peaks may be "
+                      f"below the cap, not missing.", stacklevel=2)
+    return st
 
 
 # --------------------------------------------------------------------------- #
@@ -740,7 +1138,45 @@ def _cli():
     v.add_argument("--allow-network", action="store_true",
                    help="allow verifying against a /Volumes source (can hang on SMB)")
 
+    pm = sub.add_parser("patch-ms1",
+                        help="replace capped MS1 peaks in a cache with the full centroids from the RAW")
+    pm.add_argument("target", nargs="+", help="spectrum cache .db or the mzML it sits beside")
+    pm.add_argument("--raw", help="RAW file (default: <mzml_dir>/<stem>.raw); only with one target")
+    pm.add_argument("--pwiz-dir", help="directory with the Thermo RawFileReader DLLs")
+    pm.add_argument("--dry-run", action="store_true", help="check only, write nothing")
+    pm.add_argument("--force", action="store_true", help="redo a cache patched from another RAW")
+    pm.add_argument("--mz-ppm", type=float, default=0.5)
+    pm.add_argument("--mz-mode", choices=["auto", "exact", "calibrated"], default="auto",
+                    help="calibrated: the cache was built from a recalibrated mzML (default auto: by name)")
+
+    ms = sub.add_parser("ms1-status", help="is MS1 capped, and was the cache patched?")
+    ms.add_argument("target", nargs="+")
+
     args = ap.parse_args()
+    if args.cmd == "patch-ms1":
+        if args.raw and len(args.target) > 1:
+            ap.error("--raw takes one target")
+        bad = 0
+        for tgt in args.target:
+            try:
+                res = patch_ms1(tgt, args.raw, pwiz_dir=args.pwiz_dir, dry_run=args.dry_run,
+                                force=args.force, mz_ppm=args.mz_ppm, mz_mode=args.mz_mode,
+                                log=lambda m: print(f"   {m}", flush=True))
+                print(f"[{res['status']}] {tgt}: {res.get('n_ms1')} MS1, truncated "
+                      f"{res.get('ms1_truncated_before')} at {res.get('cap_undone')}, peaks "
+                      f"{res.get('ms1_peaks_before')} -> {res.get('ms1_peaks_after')}", flush=True)
+            except (PatchError, FileNotFoundError, RuntimeError) as e:
+                bad += 1
+                print(f"[FAILED] {tgt}: {e}", flush=True)
+        sys.exit(1 if bad else 0)
+    if args.cmd == "ms1-status":
+        for tgt in args.target:
+            r = open_spectra(tgt)
+            try:
+                print(tgt, json.dumps(ms1_cap_status(r)))
+            finally:
+                r.close()
+        return
     if args.cmd == "build":
         if args.beside:
             out = cache_path_for(args.mzml)
