@@ -143,12 +143,12 @@ N-glycans. Tri- and tetra-LacNAc ions indicate further extension.
 GLYCAN_Y_LOSSES = {
     'HexNAc_TMT': {
         'Y0': 528.2859,
-        'Y0-H2O': 528.2859 - 18.0106,
+        'Y0-H2O': 528.2859 + 18.0106,   # Y0 minus water: the loss is glycan + H2O
         'Y*': 203.0794,
     },
     'HexNAc': {
         'Y0': 203.0794,
-        'Y0-H2O': 203.0794 - 18.0106,
+        'Y0-H2O': 203.0794 + 18.0106,   # Y0 minus water: the loss is glycan + H2O
     },
 }
 """Mass losses from intact glycopeptide to produce Y ions."""
