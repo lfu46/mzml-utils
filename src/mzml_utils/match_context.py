@@ -14,6 +14,8 @@ match_isotopes=not ctx.deisotope_applied)``.
 """
 from __future__ import annotations
 
+import functools
+
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
@@ -107,6 +109,7 @@ def canonical_match(
     exclude_mzs: Optional[List[float]] = None,
     exclude_tol_ppm: float = 15.0,
     match_fn: Optional[Callable] = None,
+    exclusive: bool = True,
 ) -> List[MatchedIon]:
     """Canonical theoretical→experimental match.
 
@@ -121,6 +124,9 @@ def canonical_match(
          De-duped by (ion_type, ion_number, charge) against primary matches.
       3. If ``exclude_mzs`` is provided, any match whose observed m/z is
          within ``exclude_tol_ppm`` of an exclusion target is dropped.
+
+    ``exclusive=False`` (default matcher only) lets one peak be reported for every identity it
+    fits, instead of the first in priority order.
 
     Each match's ``origin`` says where it was found: ``deisotoped`` (step 1 on a deisotoped
     spectrum), ``raw`` (step 1 without deisotoping) or ``raw_fallback`` (step 2).
@@ -137,6 +143,10 @@ def canonical_match(
         return []
 
     mp = match_fn or _default_match_peaks
+    if not exclusive:
+        if match_fn is not None:
+            raise ValueError("exclusive=False needs the default matcher")
+        mp = functools.partial(_default_match_peaks, exclusive=False)
 
     primary = mp(
         ions, ctx.exp_mz, ctx.exp_intensity,

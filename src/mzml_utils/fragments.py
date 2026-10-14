@@ -377,7 +377,8 @@ def match_peaks(theoretical_ions: List[TheoreticalIon],
                 exp_intensity: np.ndarray,
                 tolerance_ppm: float = 20.0,
                 match_isotopes: bool = True,
-                max_isotope: int = 2) -> List[MatchedIon]:
+                max_isotope: int = 2,
+                exclusive: bool = True) -> List[MatchedIon]:
     """
     Match experimental peaks to theoretical ions.
 
@@ -388,6 +389,10 @@ def match_peaks(theoretical_ions: List[TheoreticalIon],
         tolerance_ppm: Mass tolerance in ppm.
         match_isotopes: Also try M+1, M+2 isotope peaks.
         max_isotope: Maximum isotope offset.
+        exclusive: Each peak explains at most one ion (default): ions are taken in priority
+            order (Y, then no-loss, then neutral-loss ions, by m/z) and a used peak is skipped.
+            ``False`` lets every ion take its nearest peak, so a peak that fits several
+            identities is reported once per identity -- the evidence before any choice.
 
     Returns:
         List of :class:`MatchedIon` objects.
@@ -416,7 +421,7 @@ def match_peaks(theoretical_ions: List[TheoreticalIon],
             if len(indices) == 0:
                 continue
             for idx in indices[np.argsort(np.abs(exp_mz[indices] - target))]:
-                if idx in used_peaks:
+                if exclusive and idx in used_peaks:
                     continue
                 err = (exp_mz[idx] - target) / target * 1e6
                 ann = f"{ion.annotation}+{iso}" if iso > 0 else ion.annotation

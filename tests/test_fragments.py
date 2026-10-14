@@ -203,3 +203,14 @@ def test_canonical_match_records_origin():
     deiso = canonical_match(ions, from_spectrum(sp, tolerance_ppm=10, deisotope_spectrum=True, max_charge=2),
                             raw_fallback=True)
     assert deiso and {m.origin for m in deiso} <= {"deisotoped", "raw_fallback"}
+
+
+def test_non_exclusive_matching_reports_every_identity_of_a_peak():
+    import numpy as np
+    from mzml_utils.fragments import TheoreticalIon, match_peaks
+    ions = [TheoreticalIon(ion_type='b', ion_number=2, charge=1, mz=300.1, sequence='AB', annotation='a'),
+            TheoreticalIon(ion_type='y', ion_number=2, charge=1, mz=300.1, sequence='CD', annotation='b')]
+    mz, it = np.array([300.1]), np.array([1e4])
+    assert len(match_peaks(ions, mz, it, match_isotopes=False)) == 1
+    both = match_peaks(ions, mz, it, match_isotopes=False, exclusive=False)
+    assert {m.ion_type for m in both} == {'b', 'y'}
